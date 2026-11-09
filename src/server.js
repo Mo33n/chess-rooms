@@ -25,7 +25,7 @@ function send(res, status, body, type) {
 
 const MAX_BODY = 64 * 1024;
 
-function readBody(req) {
+function readBody(req, res) {
   return new Promise((resolve, reject) => {
     const chunks = [];
     let size = 0;
@@ -40,7 +40,11 @@ function readBody(req) {
       if (failed) return;
       size += chunk.length;
       if (size > MAX_BODY) {
-        fail(new Error("too large"));
+        failed = true;
+        chunks.length = 0;
+        res.writeHead(400, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "bad request" }), () => req.destroy());
+        reject(new Error("too large"));
         return;
       }
       chunks.push(chunk);
@@ -55,7 +59,7 @@ function readBody(req) {
         fail(new Error("json"));
       }
     });
-    req.on("error", fail);
+    req.on("error", (error) => fail(error));
   });
 }
 
@@ -67,7 +71,7 @@ createServer(async (req, res) => {
       return;
     }
     if (req.method === "POST" && path === "/api/rooms") {
-      const body = await readBody(req);
+      const body = await readBody(req, res);
       const result = createRoom(body.name);
       send(res, result.status, result.body, "application/json");
       return;
@@ -84,20 +88,20 @@ createServer(async (req, res) => {
     }
     match = path.match(/^\/api\/rooms\/([^/]+)\/join$/);
     if (req.method === "POST" && match) {
-      const body = await readBody(req);
+      const body = await readBody(req, res);
       const result = joinRoom(match[1], body.name, body.color);
       send(res, result.status, result.body, "application/json");
       return;
     }
     match = path.match(/^\/api\/rooms\/([^/]+)\/move$/);
     if (req.method === "POST" && match) {
-      const body = await readBody(req);
+      const body = await readBody(req, res);
       const result = moveRoom(match[1], body.token, body.uci);
       send(res, result.status, result.body, "application/json");
       return;
     }
     if (req.method === "POST" && path === "/api/tournaments") {
-      const body = await readBody(req);
+      const body = await readBody(req, res);
       const result = createTournament(body.name);
       send(res, result.status, result.body, "application/json");
       return;
@@ -114,35 +118,35 @@ createServer(async (req, res) => {
     }
     match = path.match(/^\/api\/tournaments\/([^/]+)\/players$/);
     if (req.method === "POST" && match) {
-      const body = await readBody(req);
+      const body = await readBody(req, res);
       const result = addPlayer(match[1], body.name);
       send(res, result.status, result.body, "application/json");
       return;
     }
     match = path.match(/^\/api\/tournaments\/([^/]+)\/start$/);
     if (req.method === "POST" && match) {
-      await readBody(req);
+      await readBody(req, res);
       const result = startTournament(match[1]);
       send(res, result.status, result.body, "application/json");
       return;
     }
     match = path.match(/^\/api\/tournaments\/([^/]+)\/results$/);
     if (req.method === "POST" && match) {
-      const body = await readBody(req);
+      const body = await readBody(req, res);
       const result = recordResult(match[1], body.round, body.white, body.black, body.result);
       send(res, result.status, result.body, "application/json");
       return;
     }
     match = path.match(/^\/api\/tournaments\/([^/]+)\/next$/);
     if (req.method === "POST" && match) {
-      await readBody(req);
+      await readBody(req, res);
       const result = nextRound(match[1]);
       send(res, result.status, result.body, "application/json");
       return;
     }
     send(res, 404, { error: "not found" }, "application/json");
   } catch {
-    send(res, 400, { error: "bad request" }, "application/json");
+    if (!res.headersSent) send(res, 400, { error: "bad request" }, "application/json");
   }
 }).listen(port, "127.0.0.1", () => {
   console.log(`chess rooms http://127.0.0.1:${port}/`);
