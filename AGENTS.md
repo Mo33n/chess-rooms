@@ -39,19 +39,36 @@ the gate.
 
 `POST /api/rooms/:id/join` `{ "name", "color" }` with `color` of `white` or
 `black` returns `{ token, room }`. A taken seat rejects a different name with
-409. A tournament room only admits the paired name.
+409. A tournament room admits only the paired name on the paired color: any
+other name, or that name on the other color, is 409. The paired name may sit
+again and receives a new token.
+
+A room document from create, get, join, and move includes `position` and
+`check`. `position` is eight strings of length 8, rank 8 first: white pieces
+`KQRBNP`, black pieces lowercase, empty `.`. The start is `rnbqkbnr`,
+`pppppppp`, four ranks of `........`, `PPPPPPPP`, `RNBQKBNR`. `check` is true
+only while `status` is `playing` and the side to move is in check. After
+`checkmate`, `stalemate`, or `agreed`, `check` is false.
 
 `POST /api/rooms/:id/move` `{ "token", "uci" }` plays a move for the seat whose
-turn it is. Scholar's mate (`e2e4 e7e5 d1h5 b8c6 f1c4 g8f6 h5f7`) ends
-`status: "checkmate"`, `winner: "white"`. An illegal move or a move after the
-game is over is 400.
+turn it is. Castling (`e1g1`, `e1c1`, `e8g8`, `e8c8`), en passant, and
+promotion (`e7e8q` and the same with `r`, `b`, or `n`) are legal when the
+position allows them. Scholar's mate (`e2e4 e7e5 d1h5 b8c6 f1c4 g8f6 h5f7`)
+ends `status: "checkmate"`, `winner: "white"`. Stalemate ends
+`status: "stalemate"`, `winner: null`, `turn: null`. An illegal move, or a
+move after the game is over, is 400 and does not change the room.
 
 `POST /api/tournaments` `{ "name" }`, then `POST /api/tournaments/:id/players`
-`{ "name" }`. `POST .../start` needs two or more players and opens a room for
-each pairing. `POST .../results` `{ "round", "white", "black", "result" }`
-records `1-0`, `0-1`, or `1/2-1/2` when the room was not already finished. A
-checkmate in the pairing's room records the result itself. `POST .../next`
-starts another round after every pairing in the current round has a result.
+`{ "name" }`. A duplicate name is 400. A player added after start is 400.
+`POST .../start` needs two or more players and an even count: fewer than two,
+or an odd count, is 400 and opens no rooms (an odd count is not a bye).
+`POST .../results` `{ "round", "white", "black", "result" }` records `1-0`,
+`0-1`, or `1/2-1/2` when that pairing has no result yet. A second result, an
+unknown pairing, or any other result is 400. A checkmate in the pairing's room
+records `1-0` or `0-1` itself. A stalemate records `1/2-1/2` and adds 0.5 to
+each of those two scores, and does not replace a result already stored.
+`POST .../next` is 400 while any pairing in the current round has no result,
+and otherwise starts another round.
 
 `GET /` is the page.
 
