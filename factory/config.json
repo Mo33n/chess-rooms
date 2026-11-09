@@ -1,0 +1,64 @@
+{
+  "concurrency": 2,
+  "auto_merge": false,
+  "max_rounds": 3,
+  "base_branch": "main",
+  "merge_method": "merge",
+  "agent_timeout": "45m",
+  "docs_dir": "docs/programs",
+  "labels": {
+    "queue": "factory",
+    "needs_info": "factory:needs-info",
+    "needs_human": "factory:needs-human"
+  },
+  "omp": {
+    "bin": "omp",
+    "config": "factory/omp.yml"
+  },
+  "roles": {
+    "intake": "smol",
+    "spec-writer": "slow",
+    "builder": "default",
+    "approver": "slow",
+    "researcher": "slow",
+    "planner": "slow"
+  },
+  "routing": {
+    "low": {
+      "code": "smol"
+    },
+    "medium": {
+      "code": "default"
+    },
+    "high": {
+      "code": "slow"
+    }
+  },
+  "surface_reviewers": {
+    "ui": {
+      "ux": "default",
+      "ui": "smol"
+    },
+    "security": {
+      "security": "slow"
+    }
+  },
+  "models": {
+    "smol": "cursor/grok-4.7",
+    "default": "cursor/grok-4.7",
+    "slow": "cursor/grok-4.7"
+  },
+  "protected_paths": [
+    "factory/checks.sh",
+    "factory/accept.sh",
+    "factory/config.json",
+    "factory/omp.yml",
+    "factory/agents/*",
+    "factory/bin/*",
+    "test/hidden/*"
+  ],
+  "ports": {
+    "base": 5100,
+    "step": 10
+  }
+}

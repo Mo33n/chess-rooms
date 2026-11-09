@@ -1,0 +1,15 @@
+# Overlay loaded only for factory/bin/agent runs. Does not change ~/.omp.
+# Unattended: no ask prompts, no extra advisor (the factory already reviews),
+# no autolearn, no web search. Models are cursor/grok-4.7 via omp's cursor provider.
+tools:
+  approvalMode: yolo
+ask:
+  enabled: false
+advisor:
+  enabled: false
+autolearn:
+  enabled: false
+web_search:
+  enabled: false
+bash:
+  gitGuard: true
