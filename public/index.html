@@ -64,8 +64,118 @@
       }
     }
 
-    function openRoom(room) {
-      document.getElementById("board").textContent = room.name;
+    let openId = null;
+    let seatToken = null;
+
+    function mountBoard(room) {
+      const board = document.getElementById("board");
+      board.replaceChildren();
+      board.dataset.roomId = room.id;
+      const title = document.createElement("p");
+      title.id = "open-room-name";
+      board.appendChild(title);
+      const whiteSeat = document.createElement("p");
+      whiteSeat.id = "seat-white";
+      board.appendChild(whiteSeat);
+      const blackSeat = document.createElement("p");
+      blackSeat.id = "seat-black";
+      board.appendChild(blackSeat);
+      const seatError = document.createElement("p");
+      seatError.id = "seat-error";
+      board.appendChild(seatError);
+      for (const color of ["white", "black"]) {
+        const form = document.createElement("form");
+        form.id = "sit-" + color;
+        const input = document.createElement("input");
+        input.id = color + "-name";
+        input.type = "text";
+        const button = document.createElement("button");
+        button.type = "submit";
+        button.textContent = "Sit " + color;
+        form.appendChild(input);
+        form.appendChild(button);
+        form.addEventListener("submit", (event) => {
+          event.preventDefault();
+          return sit(color, input.value);
+        });
+        board.appendChild(form);
+      }
+      const moveForm = document.createElement("form");
+      moveForm.id = "move-form";
+      const uci = document.createElement("input");
+      uci.id = "uci";
+      uci.type = "text";
+      const moveButton = document.createElement("button");
+      moveButton.type = "submit";
+      moveButton.textContent = "Move";
+      moveForm.appendChild(uci);
+      moveForm.appendChild(moveButton);
+      moveForm.addEventListener("submit", (event) => {
+        event.preventDefault();
+        return playMove(uci.value);
+      });
+      board.appendChild(moveForm);
+    }
+
+    function showSeats(room) {
+      const board = document.getElementById("board");
+      if (board.dataset.roomId !== room.id) mountBoard(room);
+      document.getElementById("open-room-name").textContent = room.name;
+      document.getElementById("seat-white").textContent = room.white == null ? "empty" : room.white;
+      document.getElementById("seat-black").textContent = room.black == null ? "empty" : room.black;
+    }
+
+    async function openRoom(room) {
+      openId = room.id;
+      seatToken = null;
+      const res = await fetch("/api/rooms/" + room.id);
+      const body = await res.json();
+      showSeats(body);
+      return body;
+    }
+
+    async function refreshOpen() {
+      if (!openId) return null;
+      const res = await fetch("/api/rooms/" + openId);
+      if (!res.ok) return null;
+      const body = await res.json();
+      showSeats(body);
+      return body;
+    }
+
+    async function sit(color, name) {
+      if (!openId || name.length === 0) return null;
+      const res = await fetch("/api/rooms/" + openId + "/join", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name, color }),
+      });
+      const body = await res.json();
+      if (!res.ok) {
+        document.getElementById("seat-error").textContent = body.error || "";
+        return body;
+      }
+      document.getElementById("seat-error").textContent = "";
+      seatToken = body.token;
+      showSeats(body.room);
+      return body;
+    }
+
+    async function playMove(uci) {
+      if (!openId || !seatToken) return null;
+      const res = await fetch("/api/rooms/" + openId + "/move", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ token: seatToken, uci }),
+      });
+      const body = await res.json();
+      if (!res.ok) {
+        document.getElementById("seat-error").textContent = body.error || "";
+        return { status: res.status, body };
+      }
+      document.getElementById("seat-error").textContent = "";
+      showSeats(body);
+      return { status: res.status, body };
     }
 
     async function refreshRooms() {
@@ -77,10 +187,13 @@
 
     document.getElementById("create-room").addEventListener("submit", (event) => {
       event.preventDefault();
-      createRoom(document.getElementById("room-name").value);
+      return createRoom(document.getElementById("room-name").value);
     });
 
-    setInterval(refreshRooms, POLL_MS);
+    setInterval(() => {
+      refreshRooms();
+      refreshOpen();
+    }, POLL_MS);
   </script>
 </body>
 </html>
