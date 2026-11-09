@@ -242,6 +242,9 @@ export function nextRound(tournamentId) {
   if (!current || current.pairings.some((pairing) => pairing.result === null)) {
     return { status: 400, body: { error: "bad request" } };
   }
+  if (tournament.players.length % 2 !== 0) {
+    return { status: 400, body: { error: "bad request" } };
+  }
   const roundNumber = current.round + 1;
   tournament.rounds.push({ round: roundNumber, pairings: pairPlayers(tournament, roundNumber) });
   return { status: 200, body: publicTournament(tournament) };
