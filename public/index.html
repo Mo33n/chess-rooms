@@ -123,6 +123,36 @@
         return playMove(uci.value);
       });
       board.appendChild(moveForm);
+      const grid = document.createElement("div");
+      grid.id = "position";
+      board.appendChild(grid);
+      const status = document.createElement("p");
+      status.id = "board-status";
+      board.appendChild(status);
+    }
+
+    function drawPosition(room) {
+      const grid = document.getElementById("position");
+      grid.replaceChildren();
+      for (const rank of room.position || []) {
+        const row = document.createElement("div");
+        for (const piece of rank) {
+          const cell = document.createElement("span");
+          cell.textContent = piece;
+          row.appendChild(cell);
+        }
+        grid.appendChild(row);
+      }
+      const words = [];
+      if (room.status === "checkmate") {
+        words.push("checkmate");
+        if (room.winner) words.push(room.winner);
+      } else if (room.status === "stalemate") {
+        words.push("stalemate");
+      } else if (room.check) {
+        words.push("check");
+      }
+      document.getElementById("board-status").textContent = words.length ? " " + words.join(" ") : "";
     }
 
     function showSeats(room) {
@@ -131,6 +161,7 @@
       document.getElementById("open-room-name").textContent = room.name;
       document.getElementById("seat-white").textContent = "White: " + (room.white == null ? "empty" : room.white);
       document.getElementById("seat-black").textContent = "Black: " + (room.black == null ? "empty" : room.black);
+      drawPosition(room);
     }
 
     async function openRoom(room) {
