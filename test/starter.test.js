@@ -200,8 +200,10 @@ function element() {
     value: "",
     type: "",
     tagName: "",
+    dataset: {},
     children: [],
     listeners: {},
+    focus() {},
     addEventListener(type, fn) {
       this.listeners[type] = fn;
     },
@@ -268,6 +270,9 @@ test("the page lists rooms by polling and opens a name on the board", async (t) 
   await second.context.refreshRooms();
   const listed = second.elements["room-list"].children.map((row) => row.textContent);
   assert.deepEqual(listed, ["Window"]);
+  const kept = second.elements["room-list"].children[0];
+  await second.context.refreshRooms();
+  assert.equal(second.elements["room-list"].children[0], kept);
 
   second.elements["room-list"].children[0].listeners.click();
   assert.equal(second.elements.board.textContent, "Window");
