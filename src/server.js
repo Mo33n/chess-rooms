@@ -23,20 +23,39 @@ function send(res, status, body, type) {
   res.end(typeof body === "string" ? body : JSON.stringify(body));
 }
 
+const MAX_BODY = 64 * 1024;
+
 function readBody(req) {
   return new Promise((resolve, reject) => {
     const chunks = [];
-    req.on("data", (chunk) => chunks.push(chunk));
+    let size = 0;
+    let failed = false;
+    function fail(error) {
+      if (failed) return;
+      failed = true;
+      chunks.length = 0;
+      reject(error);
+    }
+    req.on("data", (chunk) => {
+      if (failed) return;
+      size += chunk.length;
+      if (size > MAX_BODY) {
+        fail(new Error("too large"));
+        return;
+      }
+      chunks.push(chunk);
+    });
     req.on("end", () => {
+      if (failed) return;
       const raw = Buffer.concat(chunks).toString("utf8");
       if (!raw) return resolve({});
       try {
         resolve(JSON.parse(raw));
       } catch {
-        reject(new Error("json"));
+        fail(new Error("json"));
       }
     });
-    req.on("error", reject);
+    req.on("error", fail);
   });
 }
 

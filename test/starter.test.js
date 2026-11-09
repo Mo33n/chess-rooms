@@ -185,4 +185,10 @@ test("two rooms, scholar's mate, and a four-player tournament", async (t) => {
   assert.equal(next.body.rounds.length, 2);
   const reseated = next.body.rounds[1].pairings.flatMap((pairing) => [pairing.white, pairing.black]).sort();
   assert.deepEqual(reseated, ["Ada", "Bea", "Cal", "Dee"]);
+
+  const huge = await api(port, "/api/rooms", {
+    method: "POST",
+    body: JSON.stringify({ name: "n".repeat(70 * 1024) }),
+  });
+  assert.equal(huge.status, 400);
 });
