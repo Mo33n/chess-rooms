@@ -176,6 +176,20 @@ function reportButton(page, white, black, result) {
   });
 }
 
+test("an unchanged tournament poll keeps the result buttons", async (t) => {
+  const server = await startServer();
+  t.after(() => server.stop());
+  const page = loadPage(await pageHtml(server.port), server.port);
+  await fourPlayer(page);
+  const view = page.elements["tournament-view"];
+  const before = view.children;
+  const button = reportButton(page, "Ada", "Bea", "1-0");
+  await page.context.refreshTournament();
+  assert.equal(view.children, before);
+  assert.equal(reportButton(page, "Ada", "Bea", "1-0"), button);
+  assert.equal(button.ariaLabel, "1 Ada Bea 1-0");
+});
+
 test("a polled checkmate shows 1-0 and one score", async (t) => {
   const server = await startServer();
   t.after(() => server.stop());

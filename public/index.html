@@ -248,6 +248,7 @@
     }
 
     let tournamentId = null;
+    let tournamentSnapshot = "";
 
     function ensureChild(root, node) {
       for (const child of root.children) {
@@ -266,6 +267,9 @@
     }
 
     function renderTournament(tournament) {
+      const next = JSON.stringify(tournament);
+      if (next === tournamentSnapshot) return;
+      tournamentSnapshot = next;
       const view = tournamentNodes().view;
       view.replaceChildren();
       const name = document.createElement("p");
@@ -292,6 +296,7 @@
             const button = document.createElement("button");
             button.type = "button";
             button.textContent = value;
+            button.ariaLabel = round.round + " " + pairing.white + " " + pairing.black + " " + value;
             button.dataset.round = String(round.round);
             button.dataset.white = pairing.white;
             button.dataset.black = pairing.black;
