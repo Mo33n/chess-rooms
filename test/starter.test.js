@@ -5,6 +5,7 @@ import { readFileSync } from "node:fs";
 import net from "node:net";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import vm from "node:vm";
 
 test("this package is the chess rooms app", () => {
   const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url)));
@@ -191,4 +192,99 @@ test("two rooms, scholar's mate, and a four-player tournament", async (t) => {
     body: JSON.stringify({ name: "n".repeat(70 * 1024) }),
   });
   assert.equal(huge.status, 400);
+});
+
+function element() {
+  return {
+    textContent: "",
+    value: "",
+    type: "",
+    tagName: "",
+    children: [],
+    listeners: {},
+    addEventListener(type, fn) {
+      this.listeners[type] = fn;
+    },
+    appendChild(child) {
+      this.children.push(child);
+      return child;
+    },
+    replaceChildren() {
+      this.children = [];
+    },
+  };
+}
+
+function loadPage(html, port, intervals) {
+  const script = html.match(/<script>([\s\S]*?)<\/script>/)[1];
+  const elements = {};
+  const document = {
+    getElementById(id) {
+      if (!elements[id]) elements[id] = element();
+      return elements[id];
+    },
+    createElement(tag) {
+      const node = element();
+      node.tagName = tag.toUpperCase();
+      return node;
+    },
+  };
+  const context = {
+    document,
+    fetch: (path, options) => fetch(`http://127.0.0.1:${port}${path}`, options),
+    setInterval(fn, ms) {
+      intervals.push(ms);
+      return 1;
+    },
+  };
+  vm.runInNewContext(script, context);
+  return { context, elements };
+}
+
+test("the page lists rooms by polling and opens a name on the board", async (t) => {
+  const server = await startServer();
+  t.after(() => server.stop());
+  const { port } = server;
+  const page = await fetch(`http://127.0.0.1:${port}/`);
+  const html = await page.text();
+  for (const id of ["rooms", "board", "tournaments"]) {
+    assert.match(html, new RegExp(`id="${id}"`));
+  }
+  assert.match(html, /fetch\("\/api\/rooms"/);
+  assert.match(html, /method:\s*"POST"/);
+  assert.match(html, /JSON\.stringify\(\{\s*name\s*\}\)/);
+
+  const poll = html.match(/const POLL_MS = (\d+)/);
+  assert.ok(poll);
+  assert.ok(Number(poll[1]) < 2000);
+
+  const intervals = [];
+  const first = loadPage(html, port, intervals);
+  const second = loadPage(html, port, intervals);
+  assert.ok(intervals.every((ms) => ms < 2000));
+
+  first.context.document.getElementById("room-name").value = "Window";
+  await first.context.createRoom(first.context.document.getElementById("room-name").value);
+  await second.context.refreshRooms();
+  const listed = second.elements["room-list"].children.map((row) => row.textContent);
+  assert.deepEqual(listed, ["Window"]);
+
+  second.elements["room-list"].children[0].listeners.click();
+  assert.equal(second.elements.board.textContent, "Window");
+  assert.equal(second.elements.board.children.length, 0);
+  assert.doesNotMatch(html, /[♔♕♖♗♘♙♚♛♜♝♞♟]/);
+  assert.doesNotMatch(html, /square/);
+
+  const hostile = "<img src=x onerror=alert(1)>";
+  await api(port, "/api/rooms", { method: "POST", body: JSON.stringify({ name: hostile }) });
+  await second.context.refreshRooms();
+  const names = second.elements["room-list"].children.map((row) => row.textContent);
+  assert.ok(names.includes(hostile));
+  for (const row of second.elements["room-list"].children) {
+    assert.equal(row.tagName, "BUTTON");
+    assert.equal(row.children.length, 0);
+  }
+
+  await first.context.createRoom("");
+  assert.equal(first.elements["room-error"].textContent, "bad request");
 });

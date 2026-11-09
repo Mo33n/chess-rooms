@@ -29,7 +29,7 @@ the gate.
 
 - `src/server.js` HTTP server, plain `node:http`, ES modules
 - `src/` is where rules (`chess.js`), state (`store.js`) and routes belong
-- `public/index.html` the page; it must keep `id="rooms"`, `id="board"`, `id="tournaments"`
+- `public/index.html` the page; it must keep `id="rooms"`, `id="board"`, `id="tournaments"`. The page creates a named room and lists rooms by polling `GET /api/rooms`.
 - `test/starter.test.js` development tests; add to this directory
 - `test/hidden/product.test.js` the contract the gate runs
 
