@@ -29,7 +29,7 @@ the gate.
 
 - `src/server.js` HTTP server, plain `node:http`, ES modules
 - `src/` is where rules (`chess.js`), state (`store.js`) and routes belong
-- `public/index.html` the page; it must keep `id="rooms"`, `id="board"`, `id="tournaments"`. The page creates a named room and lists rooms by polling `GET /api/rooms`. The open room sits white and black by name, shows both names, and moves with the token from the latest join. The open board draws `position` with white at the bottom and shows check, checkmate, stalemate, and the winner. Another browser sees a move by polling within two seconds. `#tournaments` creates a named tournament, adds player names, starts it, and shows each player's name and score and every round with its number, pairings, and result. A person reports `1-0`, `0-1`, or `1/2-1/2` for an unfinished pairing. Checkmate and stalemate in a pairing room show that result and the scores on the next poll. Next round is refused with `bad request` while a pairing has no result; after every pairing has a result both rounds stay visible. Pairing rooms show up in the rooms list. A refused seat and a start with fewer than two players are shown on the page.
+- `public/index.html` the page; it must keep `id="rooms"`, `id="board"`, `id="tournaments"`. The page creates a named room and lists rooms by polling `GET /api/rooms`. The open room sits white and black by name, shows both names, and moves with the token from the latest join. The open board draws `position` with white at the bottom and shows check, checkmate, stalemate, and the winner. Another browser sees a move by polling within two seconds. `#tournaments` creates a named tournament, adds player names, starts it, and shows each player's name and score and every round with its number, pairings, and result. A person reports `1-0`, `0-1`, or `1/2-1/2` for an unfinished pairing. Checkmate and stalemate in a pairing room show that result and the scores on the next poll. Next round is refused with `bad request` while a pairing has no result; after every pairing has a result both rounds stay visible. Pairing rooms show up in the rooms list. A refused seat and a start with fewer than two players are shown on the page. A start with an odd count of three or more shows that the number of players is odd.
 - `test/starter.test.js` development tests; add to this directory
 - `test/hidden/product.test.js` the contract the gate runs
 
@@ -68,7 +68,8 @@ unknown pairing, or any other result is 400. A checkmate in the pairing's room
 records `1-0` or `0-1` itself. A stalemate records `1/2-1/2` and adds 0.5 to
 each of those two scores, and does not replace a result already stored.
 `POST .../next` is 400 while any pairing in the current round has no result,
-and otherwise starts another round.
+and otherwise starts another round. An odd player count is also 400 and opens
+no rooms.
 
 `GET /` is the page.
 

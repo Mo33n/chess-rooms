@@ -249,6 +249,7 @@
 
     let tournamentId = null;
     let tournamentSnapshot = "";
+    let shownTournament = null;
 
     function ensureChild(root, node) {
       for (const child of root.children) {
@@ -267,6 +268,7 @@
     }
 
     function renderTournament(tournament) {
+      shownTournament = tournament;
       const next = JSON.stringify(tournament);
       if (next === tournamentSnapshot) return;
       tournamentSnapshot = next;
@@ -402,7 +404,8 @@
       const body = await res.json();
       const nodes = tournamentNodes();
       if (!res.ok) {
-        nodes.error.textContent = body.error || "";
+        const count = shownTournament && shownTournament.players ? shownTournament.players.length : 0;
+        nodes.error.textContent = count >= 3 && count % 2 !== 0 ? "the number of players is odd" : (body.error || "");
         return body;
       }
       nodes.error.textContent = "";
