@@ -289,8 +289,8 @@ test("the page lists rooms by polling and opens a name on the board", async (t) 
 
   await second.elements["room-list"].children[0].listeners.click();
   assert.equal(second.elements["open-room-name"].textContent, "Window");
-  assert.equal(second.elements["seat-white"].textContent, "empty");
-  assert.equal(second.elements["seat-black"].textContent, "empty");
+  assert.equal(second.elements["seat-white"].textContent, "White: empty");
+  assert.equal(second.elements["seat-black"].textContent, "Black: empty");
   assert.doesNotMatch(html, /[♔♕♖♗♘♙♚♛♜♝♞♟]/);
   assert.doesNotMatch(html, /square/);
 
@@ -614,8 +614,11 @@ test("the open room sits both colors, polls names, and moves with the latest tok
   await blackPage.context.refreshRooms();
   await whitePage.elements["room-list"].children[0].listeners.click();
   await blackPage.elements["room-list"].children[0].listeners.click();
-  assert.equal(whitePage.elements["seat-white"].textContent, "empty");
-  assert.equal(blackPage.elements["seat-black"].textContent, "empty");
+  assert.equal(whitePage.elements["seat-white"].textContent, "White: empty");
+  assert.equal(blackPage.elements["seat-black"].textContent, "Black: empty");
+  assert.equal(whitePage.elements["sit-white"].children[0].textContent, "White");
+  assert.equal(whitePage.elements["sit-black"].children[0].textContent, "Black");
+  assert.equal(whitePage.elements["move-form"].children[0].textContent, "Move");
 
   whitePage.elements["white-name"].value = "Ada";
   await whitePage.elements["sit-white"].listeners.submit({ preventDefault() {} });
@@ -627,8 +630,8 @@ test("the open room sits both colors, polls names, and moves with the latest tok
   const got = await api(port, `/api/rooms/${roomId}`);
   assert.equal(got.body.white, "Ada");
   assert.equal(got.body.black, "Bea");
-  assert.equal(whitePage.elements["seat-white"].textContent, "Ada");
-  assert.equal(blackPage.elements["seat-black"].textContent, "Bea");
+  assert.equal(whitePage.elements["seat-white"].textContent, "White: Ada");
+  assert.equal(blackPage.elements["seat-black"].textContent, "Black: Bea");
 
   const watcher = loadPage(html, port, intervals);
   await watcher.context.refreshRooms();
@@ -636,13 +639,13 @@ test("the open room sits both colors, polls names, and moves with the latest tok
   watcher.elements["seat-white"].textContent = "";
   const polled = await watcher.context.refreshOpen();
   assert.equal(polled.white, "Ada");
-  assert.equal(watcher.elements["seat-white"].textContent, polled.white);
-  assert.equal(watcher.elements["seat-black"].textContent, polled.black);
+  assert.equal(watcher.elements["seat-white"].textContent, "White: " + polled.white);
+  assert.equal(watcher.elements["seat-black"].textContent, "Black: " + polled.black);
 
   whitePage.elements["white-name"].value = "Cal";
   await whitePage.elements["sit-white"].listeners.submit({ preventDefault() {} });
   assert.equal(whitePage.elements["seat-error"].textContent, "seat taken");
-  assert.equal(whitePage.elements["seat-white"].textContent, "Ada");
+  assert.equal(whitePage.elements["seat-white"].textContent, "White: Ada");
   const still = await api(port, `/api/rooms/${roomId}`);
   assert.equal(still.body.white, "Ada");
 
@@ -652,19 +655,23 @@ test("the open room sits both colors, polls names, and moves with the latest tok
   await whitePage.elements["room-list"].children.find((row) => row.textContent === "Hostile").listeners.click();
   whitePage.elements["white-name"].value = hostile;
   await whitePage.elements["sit-white"].listeners.submit({ preventDefault() {} });
-  assert.equal(whitePage.elements["seat-white"].textContent, hostile);
+  assert.equal(whitePage.elements["seat-white"].textContent, "White: " + hostile);
   assert.equal(whitePage.elements["seat-white"].children.length, 0);
   assert.equal(whitePage.elements["seat-white"].tagName, "P");
 
   const refreshed = loadPage(html, port, intervals);
   await refreshed.context.refreshRooms();
   await refreshed.elements["room-list"].children.find((row) => row.textContent === "Seats").listeners.click();
+  refreshed.elements.uci.value = "e2e4";
+  await refreshed.elements["move-form"].listeners.submit({ preventDefault() {} });
+  assert.equal(refreshed.elements["seat-error"].textContent, "sit down first");
   refreshed.elements["white-name"].value = "Ada";
   await refreshed.elements["sit-white"].listeners.submit({ preventDefault() {} });
   refreshed.elements.uci.value = "e2e4";
   const moved = await refreshed.elements["move-form"].listeners.submit({ preventDefault() {} });
   assert.equal(moved.status, 200);
   assert.deepEqual(moved.body.moves, ["e2e4"]);
+  assert.equal(refreshed.elements["seat-error"].textContent, "played e2e4");
   const after = await api(port, `/api/rooms/${roomId}`);
   assert.deepEqual(after.body.moves, ["e2e4"]);
   assert.equal(hostileRoom.status, 200);
