@@ -10,7 +10,7 @@ Program `001-chess-rooms`. Stage: Ticket list waits for your approval.
 | Research | [research.md](research.md) | written |
 | Enriched PRD | [prd.enriched.md](prd.enriched.md) | accepted by Mo33n on 2026-11-09 |
 | Tickets | [tickets.md](tickets.md) | not yet |
-| Decision 1: What happens when a tournament round has an odd number of players? | [decisions/0001-what-happens-when-a-tournament-round-has.md](decisions/0001-what-happens-when-a-tournament-round-has.md) | proposed |
+| Decision 1: What happens when a tournament round has an odd number of players? | [decisions/0001-what-happens-when-a-tournament-round-has.md](decisions/0001-what-happens-when-a-tournament-round-has.md) | accepted by Mo33n on 2026-11-09 |
 
 ## Tickets
 
@@ -29,3 +29,4 @@ Program `001-chess-rooms`. Stage: Ticket list waits for your approval.
 |---|---|---|---|
 | 2026-11-09T18:29:39Z | Mo33n | program created | Chess rooms |
 | 2026-11-09T18:33:23Z | Mo33n | PRD approved |  |
+| 2026-11-09T18:54:27Z | Mo33n | decision 1 accepted | What happens when a tournament round has an odd number of players? |

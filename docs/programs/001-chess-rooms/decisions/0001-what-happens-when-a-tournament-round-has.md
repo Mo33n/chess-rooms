@@ -1,9 +1,9 @@
 ---
-status: proposed
+status: accepted
 ticket: 8
 proposed_on: 2026-11-09
-decided_by:
-decided_on:
+decided_by: Mo33n
+decided_on: 2026-11-09
 ---
 
 # What happens when a tournament round has an odd number of players?
@@ -27,7 +27,7 @@ Even counts stay as they are: everyone is paired, and a four-player event still 
 
 ## Decision
 
-Pending.
+Lets, assume We will never have odd numbers of players.
 
 ## Consequences
 
