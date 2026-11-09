@@ -29,6 +29,9 @@
     <form id="start-tournament">
       <button type="submit">Start</button>
     </form>
+    <form id="next-round">
+      <button type="submit">Next round</button>
+    </form>
     <p id="tournament-error"></p>
     <div id="tournament-view"></div>
   </div>
@@ -271,18 +274,81 @@
       for (const player of tournament.players) {
         const row = document.createElement("p");
         row.textContent = player.name;
+        const score = document.createElement("span");
+        score.textContent = " " + player.score;
+        row.appendChild(score);
         view.appendChild(row);
       }
-      const round = tournament.rounds[tournament.rounds.length - 1];
-      if (!round) return;
-      const heading = document.createElement("p");
-      heading.textContent = String(round.round);
-      view.appendChild(heading);
-      for (const pairing of round.pairings) {
-        const row = document.createElement("p");
-        row.textContent = pairing.white + " " + pairing.black;
-        view.appendChild(row);
+      for (const round of tournament.rounds) {
+        const heading = document.createElement("p");
+        heading.textContent = String(round.round);
+        view.appendChild(heading);
+        for (const pairing of round.pairings) {
+          const row = document.createElement("p");
+          const result = pairing.result ? " " + pairing.result : "";
+          row.textContent = pairing.white + " " + pairing.black + result;
+          view.appendChild(row);
+          for (const value of ["1-0", "0-1", "1/2-1/2"]) {
+            const button = document.createElement("button");
+            button.type = "button";
+            button.textContent = value;
+            button.dataset.round = String(round.round);
+            button.dataset.white = pairing.white;
+            button.dataset.black = pairing.black;
+            button.dataset.result = value;
+            button.addEventListener("click", () => {
+              return reportResult(round.round, pairing.white, pairing.black, value);
+            });
+            view.appendChild(button);
+          }
+        }
       }
+    }
+
+    async function refreshTournament() {
+      if (!tournamentId) return null;
+      const res = await fetch("/api/tournaments/" + tournamentId);
+      const body = await res.json();
+      if (!res.ok) return body;
+      renderTournament(body);
+      return body;
+    }
+
+    async function reportResult(round, white, black, result) {
+      if (!tournamentId) return null;
+      const res = await fetch("/api/tournaments/" + tournamentId + "/results", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ round, white, black, result }),
+      });
+      const body = await res.json();
+      const nodes = tournamentNodes();
+      if (!res.ok) {
+        nodes.error.textContent = body.error || "";
+        return body;
+      }
+      nodes.error.textContent = "";
+      renderTournament(body);
+      return body;
+    }
+
+    async function advanceRound() {
+      if (!tournamentId) return null;
+      const res = await fetch("/api/tournaments/" + tournamentId + "/next", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      const body = await res.json();
+      const nodes = tournamentNodes();
+      if (!res.ok) {
+        nodes.error.textContent = body.error || "";
+        return body;
+      }
+      nodes.error.textContent = "";
+      renderTournament(body);
+      await refreshRooms();
+      return body;
     }
 
     async function createTournament(name) {
@@ -360,9 +426,15 @@
       return startTournament();
     });
 
+    document.getElementById("next-round").addEventListener("submit", (event) => {
+      event.preventDefault();
+      return advanceRound();
+    });
+
     setInterval(() => {
       refreshRooms();
       refreshOpen();
+      refreshTournament();
     }, POLL_MS);
   </script>
 </body>
