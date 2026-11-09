@@ -6,7 +6,7 @@ clears it. There are no accounts: a seat token, returned when a player sits
 down, is what lets that seat move.
 
 The product is being built by the software factory from the PRD in
-`docs/programs/`. Right now `src/server.js` only serves the page.
+`docs/programs/`. `src/server.js` serves the page and the rooms and tournaments API.
 
 ## Setup
 

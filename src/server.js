@@ -1,18 +1,130 @@
-// Starter. Serves the page and nothing else; the factory builds the rest.
 import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
+import {
+  addPlayer,
+  createRoom,
+  createTournament,
+  getRoom,
+  getTournament,
+  joinRoom,
+  listRooms,
+  listTournaments,
+  moveRoom,
+  nextRound,
+  recordResult,
+  startTournament,
+} from "./store.js";
 
 const page = new URL("../public/index.html", import.meta.url);
 const port = Number(process.env.PORT || 5180);
 
+function send(res, status, body, type) {
+  res.writeHead(status, { "content-type": type });
+  res.end(typeof body === "string" ? body : JSON.stringify(body));
+}
+
+function readBody(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    req.on("data", (chunk) => chunks.push(chunk));
+    req.on("end", () => {
+      const raw = Buffer.concat(chunks).toString("utf8");
+      if (!raw) return resolve({});
+      try {
+        resolve(JSON.parse(raw));
+      } catch {
+        reject(new Error("json"));
+      }
+    });
+    req.on("error", reject);
+  });
+}
+
 createServer(async (req, res) => {
-  if (req.method === "GET" && req.url === "/") {
-    res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-    res.end(await readFile(page));
-    return;
+  const path = new URL(req.url, "http://127.0.0.1").pathname;
+  try {
+    if (req.method === "GET" && path === "/") {
+      send(res, 200, await readFile(page, "utf8"), "text/html; charset=utf-8");
+      return;
+    }
+    if (req.method === "POST" && path === "/api/rooms") {
+      const body = await readBody(req);
+      const result = createRoom(body.name);
+      send(res, result.status, result.body, "application/json");
+      return;
+    }
+    if (req.method === "GET" && path === "/api/rooms") {
+      send(res, 200, listRooms(), "application/json");
+      return;
+    }
+    let match = path.match(/^\/api\/rooms\/([^/]+)$/);
+    if (req.method === "GET" && match) {
+      const result = getRoom(match[1]);
+      send(res, result.status, result.body, "application/json");
+      return;
+    }
+    match = path.match(/^\/api\/rooms\/([^/]+)\/join$/);
+    if (req.method === "POST" && match) {
+      const body = await readBody(req);
+      const result = joinRoom(match[1], body.name, body.color);
+      send(res, result.status, result.body, "application/json");
+      return;
+    }
+    match = path.match(/^\/api\/rooms\/([^/]+)\/move$/);
+    if (req.method === "POST" && match) {
+      const body = await readBody(req);
+      const result = moveRoom(match[1], body.token, body.uci);
+      send(res, result.status, result.body, "application/json");
+      return;
+    }
+    if (req.method === "POST" && path === "/api/tournaments") {
+      const body = await readBody(req);
+      const result = createTournament(body.name);
+      send(res, result.status, result.body, "application/json");
+      return;
+    }
+    if (req.method === "GET" && path === "/api/tournaments") {
+      send(res, 200, listTournaments(), "application/json");
+      return;
+    }
+    match = path.match(/^\/api\/tournaments\/([^/]+)$/);
+    if (req.method === "GET" && match) {
+      const result = getTournament(match[1]);
+      send(res, result.status, result.body, "application/json");
+      return;
+    }
+    match = path.match(/^\/api\/tournaments\/([^/]+)\/players$/);
+    if (req.method === "POST" && match) {
+      const body = await readBody(req);
+      const result = addPlayer(match[1], body.name);
+      send(res, result.status, result.body, "application/json");
+      return;
+    }
+    match = path.match(/^\/api\/tournaments\/([^/]+)\/start$/);
+    if (req.method === "POST" && match) {
+      await readBody(req);
+      const result = startTournament(match[1]);
+      send(res, result.status, result.body, "application/json");
+      return;
+    }
+    match = path.match(/^\/api\/tournaments\/([^/]+)\/results$/);
+    if (req.method === "POST" && match) {
+      const body = await readBody(req);
+      const result = recordResult(match[1], body.round, body.white, body.black, body.result);
+      send(res, result.status, result.body, "application/json");
+      return;
+    }
+    match = path.match(/^\/api\/tournaments\/([^/]+)\/next$/);
+    if (req.method === "POST" && match) {
+      await readBody(req);
+      const result = nextRound(match[1]);
+      send(res, result.status, result.body, "application/json");
+      return;
+    }
+    send(res, 404, { error: "not found" }, "application/json");
+  } catch {
+    send(res, 400, { error: "bad request" }, "application/json");
   }
-  res.writeHead(404, { "content-type": "application/json" });
-  res.end(JSON.stringify({ error: "not found" }));
 }).listen(port, "127.0.0.1", () => {
   console.log(`chess rooms http://127.0.0.1:${port}/`);
 });
