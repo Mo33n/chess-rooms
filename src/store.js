@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { play, startingBoard } from "./chess.js";
+import { play, sideInCheck, startingBoard, startingCastle } from "./chess.js";
 
 const rooms = new Map();
 const tournaments = new Map();
@@ -20,6 +20,8 @@ function publicRoom(room) {
     white: room.white,
     black: room.black,
     turn: room.turn,
+    position: room.board.map((row) => row.join("")),
+    check: room.status === "playing" && sideInCheck(room.board, room.turn === "white"),
   };
 }
 
@@ -56,6 +58,8 @@ export function createRoom(name) {
     black: null,
     turn: "white",
     board: startingBoard(),
+    castle: startingCastle(),
+    ep: null,
     tournamentId: null,
   };
   rooms.set(room.id, room);
@@ -80,6 +84,7 @@ export function joinRoom(roomId, name, color) {
   if ((color !== "white" && color !== "black") || typeof name !== "string" || name.length === 0) {
     return { status: 400, body: { error: "bad request" } };
   }
+  if (room.tournamentId && room[color] !== name) return { status: 409, body: { error: "seat taken" } };
   if (room[color] !== null && room[color] !== name) return { status: 409, body: { error: "seat taken" } };
   room[color] = name;
   const token = randomBytes(16).toString("hex");
@@ -110,15 +115,20 @@ function applyResult(tournament, pairing, result) {
   finishAgreed(rooms.get(pairing.roomId), result);
 }
 
-function recordCheckmate(room) {
+function recordGame(room, result) {
   if (!room.tournamentId) return;
   const tournament = tournaments.get(room.tournamentId);
   if (!tournament) return;
   for (const round of tournament.rounds) {
     const pairing = round.pairings.find((entry) => entry.roomId === room.id);
     if (!pairing || pairing.result !== null) continue;
-    pairing.result = room.winner === "white" ? "1-0" : "0-1";
-    addScore(tournament, room.winner === "white" ? pairing.white : pairing.black, 1);
+    pairing.result = result;
+    if (result === "1-0") addScore(tournament, pairing.white, 1);
+    else if (result === "0-1") addScore(tournament, pairing.black, 1);
+    else {
+      addScore(tournament, pairing.white, 0.5);
+      addScore(tournament, pairing.black, 0.5);
+    }
   }
 }
 
@@ -129,15 +139,22 @@ export function moveRoom(roomId, token, uci) {
   if (!seat || seat.roomId !== roomId || room.status !== "playing" || seat.color !== room.turn) {
     return { status: 400, body: { error: "bad move" } };
   }
-  const played = play(room.board, uci, room.turn === "white");
+  const played = play(room.board, uci, room.turn === "white", { castle: room.castle, ep: room.ep });
   if (!played) return { status: 400, body: { error: "bad move" } };
   room.board = played.board;
+  room.castle = played.castle;
+  room.ep = played.ep;
   room.moves.push(uci);
   if (played.checkmate) {
     room.status = "checkmate";
     room.winner = room.turn;
     room.turn = null;
-    recordCheckmate(room);
+    recordGame(room, room.winner === "white" ? "1-0" : "0-1");
+  } else if (played.stalemate) {
+    room.status = "stalemate";
+    room.winner = null;
+    room.turn = null;
+    recordGame(room, "1/2-1/2");
   } else {
     room.turn = room.turn === "white" ? "black" : "white";
   }
@@ -188,6 +205,9 @@ export function addPlayer(tournamentId, name) {
   if (tournament.rounds.length > 0 || typeof name !== "string" || name.length === 0) {
     return { status: 400, body: { error: "bad request" } };
   }
+  if (tournament.players.some((entry) => entry.name === name)) {
+    return { status: 400, body: { error: "bad request" } };
+  }
   tournament.players.push({ name, score: 0 });
   return { status: 200, body: publicTournament(tournament) };
 }
@@ -195,7 +215,7 @@ export function addPlayer(tournamentId, name) {
 export function startTournament(tournamentId) {
   const tournament = tournaments.get(tournamentId);
   if (!tournament) return { status: 404, body: { error: "not found" } };
-  if (tournament.rounds.length > 0 || tournament.players.length < 2) {
+  if (tournament.rounds.length > 0 || tournament.players.length < 2 || tournament.players.length % 2 !== 0) {
     return { status: 400, body: { error: "bad request" } };
   }
   tournament.rounds.push({ round: 1, pairings: pairPlayers(tournament, 1) });
