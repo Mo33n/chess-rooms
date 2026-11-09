@@ -15,7 +15,23 @@
     <div id="room-list"></div>
   </div>
   <div id="board"></div>
-  <div id="tournaments"></div>
+  <div id="tournaments">
+    <form id="create-tournament">
+      <label for="tournament-name">Tournament name</label>
+      <input id="tournament-name" name="name" type="text">
+      <button type="submit">Create tournament</button>
+    </form>
+    <form id="add-player">
+      <label for="player-name">Player name</label>
+      <input id="player-name" name="name" type="text">
+      <button type="submit">Add player</button>
+    </form>
+    <form id="start-tournament">
+      <button type="submit">Start</button>
+    </form>
+    <p id="tournament-error"></p>
+    <div id="tournament-view"></div>
+  </div>
   <script>
     const POLL_MS = 1000;
 
@@ -228,9 +244,120 @@
       return body;
     }
 
+    let tournamentId = null;
+
+    function ensureChild(root, node) {
+      for (const child of root.children) {
+        if (child === node) return node;
+      }
+      root.appendChild(node);
+      return node;
+    }
+
+    function tournamentNodes() {
+      const root = document.getElementById("tournaments");
+      return {
+        error: ensureChild(root, document.getElementById("tournament-error")),
+        view: ensureChild(root, document.getElementById("tournament-view")),
+      };
+    }
+
+    function renderTournament(tournament) {
+      const view = tournamentNodes().view;
+      view.replaceChildren();
+      const name = document.createElement("p");
+      name.textContent = tournament.name;
+      view.appendChild(name);
+      for (const player of tournament.players) {
+        const row = document.createElement("p");
+        row.textContent = player.name;
+        view.appendChild(row);
+      }
+      const round = tournament.rounds[tournament.rounds.length - 1];
+      if (!round) return;
+      const heading = document.createElement("p");
+      heading.textContent = String(round.round);
+      view.appendChild(heading);
+      for (const pairing of round.pairings) {
+        const row = document.createElement("p");
+        row.textContent = pairing.white + " " + pairing.black;
+        view.appendChild(row);
+      }
+    }
+
+    async function createTournament(name) {
+      const res = await fetch("/api/tournaments", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+      const body = await res.json();
+      const nodes = tournamentNodes();
+      if (!res.ok) {
+        nodes.error.textContent = body.error || "";
+        return body;
+      }
+      tournamentId = body.id;
+      nodes.error.textContent = "";
+      renderTournament(body);
+      return body;
+    }
+
+    async function addPlayer(name) {
+      if (!tournamentId) return null;
+      const res = await fetch("/api/tournaments/" + tournamentId + "/players", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+      const body = await res.json();
+      const nodes = tournamentNodes();
+      if (!res.ok) {
+        nodes.error.textContent = body.error || "";
+        return body;
+      }
+      nodes.error.textContent = "";
+      renderTournament(body);
+      return body;
+    }
+
+    async function startTournament() {
+      if (!tournamentId) return null;
+      const res = await fetch("/api/tournaments/" + tournamentId + "/start", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      const body = await res.json();
+      const nodes = tournamentNodes();
+      if (!res.ok) {
+        nodes.error.textContent = body.error || "";
+        return body;
+      }
+      nodes.error.textContent = "";
+      renderTournament(body);
+      await refreshRooms();
+      return body;
+    }
+
     document.getElementById("create-room").addEventListener("submit", (event) => {
       event.preventDefault();
       return createRoom(document.getElementById("room-name").value);
+    });
+
+    document.getElementById("create-tournament").addEventListener("submit", (event) => {
+      event.preventDefault();
+      return createTournament(document.getElementById("tournament-name").value);
+    });
+
+    document.getElementById("add-player").addEventListener("submit", (event) => {
+      event.preventDefault();
+      return addPlayer(document.getElementById("player-name").value);
+    });
+
+    document.getElementById("start-tournament").addEventListener("submit", (event) => {
+      event.preventDefault();
+      return startTournament();
     });
 
     setInterval(() => {
