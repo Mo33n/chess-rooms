@@ -5,8 +5,82 @@
   <title>Chess Rooms</title>
 </head>
 <body>
-  <div id="rooms"></div>
+  <div id="rooms">
+    <form id="create-room">
+      <label for="room-name">Room name</label>
+      <input id="room-name" name="name" type="text">
+      <button type="submit">Create</button>
+    </form>
+    <p id="room-error"></p>
+    <div id="room-list"></div>
+  </div>
   <div id="board"></div>
   <div id="tournaments"></div>
+  <script>
+    const POLL_MS = 1000;
+
+    async function createRoom(name) {
+      const res = await fetch("/api/rooms", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+      const body = await res.json();
+      if (!res.ok) {
+        document.getElementById("room-error").textContent = body.error || "";
+        return body;
+      }
+      document.getElementById("room-error").textContent = "";
+      await refreshRooms();
+      return body;
+    }
+
+    function sameRooms(list, rooms) {
+      const rows = list.children;
+      if (rows.length !== rooms.length) return false;
+      for (let i = 0; i < rooms.length; i++) {
+        if (rows[i].dataset.roomId !== rooms[i].id) return false;
+      }
+      return true;
+    }
+
+    function renderRooms(rooms) {
+      const list = document.getElementById("room-list");
+      if (sameRooms(list, rooms)) return;
+      const active = document.activeElement;
+      const activeId = active && active.dataset ? active.dataset.roomId : "";
+      list.replaceChildren();
+      for (const room of rooms) {
+        const row = document.createElement("button");
+        row.type = "button";
+        row.dataset.roomId = room.id;
+        row.textContent = room.name;
+        row.addEventListener("click", () => openRoom(room));
+        list.appendChild(row);
+      }
+      if (!activeId) return;
+      for (const row of list.children) {
+        if (row.dataset.roomId === activeId) row.focus();
+      }
+    }
+
+    function openRoom(room) {
+      document.getElementById("board").textContent = room.name;
+    }
+
+    async function refreshRooms() {
+      const res = await fetch("/api/rooms");
+      const body = await res.json();
+      renderRooms(body.rooms);
+      return body;
+    }
+
+    document.getElementById("create-room").addEventListener("submit", (event) => {
+      event.preventDefault();
+      createRoom(document.getElementById("room-name").value);
+    });
+
+    setInterval(refreshRooms, POLL_MS);
+  </script>
 </body>
 </html>
