@@ -234,8 +234,8 @@ function loadPage(html, port, intervals) {
   const context = {
     document,
     fetch: (path, options) => fetch(`http://127.0.0.1:${port}${path}`, options),
-    setInterval(fn, ms) {
-      intervals.push(ms);
+    setInterval(...args) {
+      intervals.push(args[1]);
       return 1;
     },
   };
