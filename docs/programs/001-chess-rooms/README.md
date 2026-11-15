@@ -1,6 +1,6 @@
 # Chess rooms
 
-Program `001-chess-rooms`. Stage: Writing tickets.
+Program `001-chess-rooms`. Stage: Ticket list waits for your approval.
 
 ## Documents
 
@@ -9,9 +9,13 @@ Program `001-chess-rooms`. Stage: Writing tickets.
 | PRD | [prd.md](prd.md) | accepted by Mo33n on 2026-11-15 |
 | Research | [research.md](research.md) | written |
 | Enriched PRD | [prd.enriched.md](prd.enriched.md) | accepted by Mo33n on 2026-11-15 |
+| Tickets | [tickets.md](tickets.md) | not yet |
 
 ## Tickets
 
+- 1. Rooms, chess, and tournaments — not filed
+- 2. Play a room on the board — not filed
+- 3. Host a tournament on the page — not filed
 
 ## Consent log
 
