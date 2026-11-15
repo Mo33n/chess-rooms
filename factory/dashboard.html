@@ -1,0 +1,1104 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Software Factory</title>
+<style>
+  :root {
+    --bg: #0e1016;
+    --panel: #14171f;
+    --card: #1a1d27;
+    --card-hover: #212533;
+    --line: #2a2f3e;
+    --text: #e8eaf1;
+    --muted: #949ab0;
+    --faint: #6c7288;
+    --active: #9fd4ef;
+    --pass: #79d6a3;
+    --changes: #e7c48a;
+    --human: #f0a198;
+    --merged: #c9b8f5;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  button { font: inherit; color: inherit; }
+  textarea, input {
+    font: inherit; color: inherit; background: var(--bg); border: 1px solid var(--line);
+    border-radius: 8px; padding: 8px 10px; width: 100%;
+  }
+  textarea { min-height: 72px; max-height: 160px; resize: vertical; }
+  .btn {
+    background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 7px 12px;
+    cursor: pointer; white-space: nowrap;
+  }
+  .btn:hover { border-color: var(--muted); color: var(--text); }
+  .btn.primary {
+    background: color-mix(in srgb, var(--active) 16%, var(--bg));
+    border-color: color-mix(in srgb, var(--active) 55%, var(--line));
+    color: var(--active); font-weight: 600;
+  }
+  .btn.primary:hover { background: color-mix(in srgb, var(--active) 24%, var(--bg)); }
+  .btn.danger { border-color: color-mix(in srgb, var(--human) 50%, var(--line)); color: var(--human); }
+  .btn[disabled] { opacity: .5; cursor: default; }
+
+  /* Header */
+  header {
+    display: flex; align-items: center; justify-content: space-between; gap: 16px;
+    flex-wrap: wrap; padding: 14px 28px;
+    position: sticky; top: 0; z-index: 5;
+    background: color-mix(in srgb, var(--bg) 88%, transparent);
+    backdrop-filter: blur(14px);
+    border-bottom: 1px solid var(--line);
+  }
+  h1 { margin: 0; font-size: 16px; font-weight: 600; letter-spacing: -0.02em; }
+  .status {
+    font-family: var(--mono); font-size: 12px; color: var(--muted);
+    border: 1px solid var(--line); border-radius: 999px; padding: 3px 10px; background: var(--card);
+  }
+  .status .dot {
+    display: inline-block; width: 7px; height: 7px; border-radius: 50%;
+    background: var(--pass); margin-right: 6px; vertical-align: 1px;
+  }
+  .status.error { color: var(--human); }
+  .status.error .dot { background: var(--human); }
+  .banner {
+    margin: 12px 28px 0; padding: 10px 14px; border: 1px solid var(--human);
+    border-radius: 8px; color: var(--human); font-family: var(--mono); font-size: 12px;
+  }
+
+  /* Readiness */
+  .ready { display: flex; gap: 8px; flex-wrap: wrap; padding: 14px 28px 0; }
+  .ready span {
+    font-family: var(--mono); font-size: 11px; padding: 3px 9px; border-radius: 999px;
+    border: 1px solid var(--line); color: var(--muted); background: var(--card);
+  }
+  .ready span.ok { color: var(--pass); border-color: color-mix(in srgb, var(--pass) 40%, transparent); }
+  .ready span.bad { color: var(--changes); border-color: color-mix(in srgb, var(--changes) 50%, transparent); cursor: help; }
+
+  /* Programs */
+  .prd-form, .programs { padding: 14px 28px 0; }
+  .prd-form[hidden] { display: none; }
+  .prd-form form, .program {
+    background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 18px;
+    box-shadow: 0 1px 0 rgba(255,255,255,.04) inset;
+  }
+  .prd-form form { display: grid; gap: 8px; margin-top: 8px; }
+  .prd-form textarea { min-height: 140px; }
+  .programs { display: grid; gap: 12px; }
+  .program.waiting-you { box-shadow: inset 3px 0 0 var(--changes), 0 1px 0 rgba(255,255,255,.04) inset; }
+  .p-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+  .p-head h2 { margin: 0; font-size: 18px; letter-spacing: -0.02em; }
+  .p-head .stage {
+    font-family: var(--mono); font-size: 11px; color: var(--muted);
+    border: 1px solid var(--line); border-radius: 999px; padding: 2px 9px; background: var(--bg);
+  }
+  .p-head .stage.you {
+    color: var(--changes);
+    border-color: color-mix(in srgb, var(--changes) 45%, transparent);
+    background: color-mix(in srgb, var(--changes) 12%, var(--bg));
+  }
+  .p-head .running { color: var(--active); font-family: var(--mono); font-size: 12px; }
+  .p-head .right { margin-left: auto; font-family: var(--mono); font-size: 11px; color: var(--faint); }
+  .program .error { color: var(--human); font-size: 12px; margin: 6px 0; }
+  .program .waiting { color: var(--muted); font-size: 12px; margin: 6px 0; font-family: var(--mono); }
+  .p-grid { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 14px; margin-top: 12px; }
+  .tabs {
+    display: flex; max-width: 100%; gap: 2px; flex-wrap: wrap; margin-bottom: 10px;
+    background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 3px;
+  }
+  .tab {
+    background: none; border: 0; border-radius: 7px; padding: 4px 10px; cursor: pointer;
+    font-family: var(--mono); font-size: 11px; color: var(--muted);
+  }
+  .tab:hover { color: var(--text); }
+  .tab.on { background: var(--card-hover); color: var(--text); }
+  .p-doc {
+    background: var(--bg); border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px;
+    max-height: 420px; overflow: auto; min-height: 80px;
+  }
+  .p-doc.md { font-size: 13.5px; }
+  .side h3 { margin: 0 0 6px; font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--faint); }
+  .side section { margin-bottom: 14px; }
+  .tickets { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+  .tickets li {
+    display: flex; gap: 8px; align-items: baseline; font-size: 12.5px;
+    background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px;
+  }
+  .tickets .n { font-family: var(--mono); color: var(--active); width: 18px; flex: none; font-size: 11px; }
+  .tickets a { color: var(--text); text-decoration: none; min-width: 0; flex: 1; }
+  .tickets a:hover { text-decoration: underline; }
+  .tickets .st {
+    margin-left: auto; font-family: var(--mono); font-size: 10px; color: var(--muted); white-space: nowrap;
+    border-radius: 999px; padding: 1px 7px; background: color-mix(in srgb, var(--muted) 14%, transparent);
+  }
+  .tickets .st.merged { color: var(--merged); } .tickets .st.running { color: var(--active); }
+  .tickets .st.you { color: var(--human); } .tickets .st.ready { color: var(--pass); }
+  .tickets li.superseded a { text-decoration: line-through; color: var(--faint); }
+  .tickets .kind { font-family: var(--mono); font-size: 10px; color: var(--changes); }
+  .decision {
+    border: 1px solid color-mix(in srgb, var(--changes) 40%, var(--line));
+    background: color-mix(in srgb, var(--changes) 7%, var(--bg));
+    border-radius: 12px; padding: 12px; margin: 12px 0 8px;
+  }
+  .decision p { margin: 0 0 8px; font-size: 13px; }
+  .decision textarea { min-height: 64px; max-height: 120px; }
+  .form { display: grid; gap: 6px; margin-top: 8px; }
+  .form .row { display: flex; gap: 8px; flex-wrap: wrap; }
+  .actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+  .log { font-family: var(--mono); font-size: 11px; color: var(--muted); display: grid; gap: 2px; }
+  .log span { color: var(--faint); }
+
+  /* Board */
+  .board {
+    display: grid; grid-template-columns: repeat(7, minmax(160px, 1fr)); gap: 12px;
+    padding: 8px 28px 40px; align-items: start;
+    overflow-x: auto;
+  }
+  .board-empty {
+    grid-column: 1 / -1; color: var(--faint); font-size: 13px;
+    border: 1px dashed var(--line); border-radius: 12px; padding: 18px 16px; margin-bottom: 8px;
+  }
+  .board-empty h2 { margin: 0 0 4px; font-size: 13px; color: var(--muted); font-weight: 600; }
+  .board-empty p { margin: 0; }
+  .col { min-width: 0; }
+  .col-head {
+    display: flex; align-items: center; gap: 8px; padding: 0 2px 10px;
+    border-bottom: 1px solid var(--line); margin-bottom: 12px; position: relative;
+  }
+  .col-head h2 { margin: 0; font-size: 13px; font-weight: 600; }
+  .col-head .who { font-size: 11px; color: var(--faint); font-family: var(--mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .col-head .count { margin-left: auto; font-family: var(--mono); font-size: 11px; color: var(--muted); }
+  .col.human .col-head { border-bottom-color: color-mix(in srgb, var(--human) 55%, transparent); }
+  .col.human h2 { color: var(--human); }
+  .col.merged-col h2 { color: var(--merged); }
+  .empty { color: var(--faint); font-size: 12px; padding: 4px 2px; }
+
+  /* Cards */
+  .card {
+    display: block; width: 100%; text-align: left; cursor: pointer; color: inherit;
+    background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+    padding: 12px 12px 10px; margin-bottom: 10px;
+    transition: background .15s, border-color .15s, transform .15s;
+  }
+  .card:hover { background: var(--card-hover); transform: translateY(-1px); }
+  .card:focus-visible { outline: 2px solid var(--active); outline-offset: 2px; }
+  .card.live { border-color: color-mix(in srgb, var(--active) 35%, var(--line)); }
+  .card.human, .card.needs-info { border-color: var(--human); }
+  .card.done { opacity: .72; }
+  .card.rejected .feature { text-decoration: line-through; text-decoration-color: var(--faint); }
+  .flag.wait { color: var(--changes); }
+  .card-top { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+  .num { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+  .card-top .num { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .pulse { width: 7px; height: 7px; border-radius: 50%; background: var(--active); animation: pulse 1.6s ease-in-out infinite; }
+  .flag { margin-left: auto; font-size: 10px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--human); white-space: nowrap; }
+  .feature { font-size: 13px; line-height: 1.4; margin: 0 0 6px; }
+  .links { display: flex; gap: 10px; font-family: var(--mono); font-size: 11px; }
+  .links a { color: var(--active); text-decoration: none; }
+  .links a:hover { text-decoration: underline; }
+  .meta { display: flex; gap: 10px; margin-top: 8px; font-family: var(--mono); font-size: 10.5px; color: var(--muted); }
+  .meta .risk-high { color: var(--human); } .meta .risk-medium { color: var(--changes); }
+  .lastline { margin-top: 8px; font-family: var(--mono); font-size: 10.5px; color: var(--faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .chip.gate { flex: 0 0 38px; }
+  .chip.FAIL { border: 1px solid transparent; color: var(--human); background: color-mix(in srgb, var(--human) 16%, transparent); }
+  .rounds { margin-top: 10px; display: grid; gap: 5px; }
+  .round { display: flex; align-items: center; gap: 4px; }
+  .round .r { font-family: var(--mono); font-size: 10px; color: var(--faint); width: 20px; }
+  .chip { flex: 1; text-align: center; font-family: var(--mono); font-size: 10px; padding: 2px 0; border-radius: 4px; border: 1px dashed var(--faint); color: var(--faint); }
+  .chip.wait { animation: breathe 1.6s ease-in-out infinite; }
+  .chip.PASS { border: 1px solid transparent; color: var(--pass); background: color-mix(in srgb, var(--pass) 14%, transparent); }
+  .chip.CHANGES { border: 1px solid transparent; color: var(--changes); background: color-mix(in srgb, var(--changes) 16%, transparent); }
+  .chip.bad { border: 1px solid var(--human); color: var(--human); }
+  .card .form { cursor: default; }
+
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .25; } }
+  @keyframes breathe { 0%, 100% { opacity: 1; } 50% { opacity: .45; } }
+  @media (prefers-reduced-motion: reduce) { .pulse, .chip.wait { animation: none; } }
+
+  /* Drawer */
+  .scrim { position: fixed; inset: 0; background: rgba(5, 6, 10, .55); opacity: 0; pointer-events: none; transition: opacity .2s; }
+  .drawer {
+    position: fixed; top: 0; right: 0; bottom: 0; width: min(920px, 100vw);
+    background: var(--panel); border-left: 1px solid var(--line);
+    display: grid; grid-template-rows: auto 1fr; transform: translateX(100%); transition: transform .25s ease;
+  }
+  .open .scrim { opacity: 1; pointer-events: auto; }
+  .open .drawer { transform: none; }
+  .d-head { padding: 20px 24px 16px; border-bottom: 1px solid var(--line); position: relative; }
+  .d-head .num { font-size: 12px; }
+  .d-head h3 { margin: 4px 40px 6px 0; font-size: 16px; font-weight: 600; line-height: 1.35; }
+  .close { position: absolute; top: 16px; right: 16px; width: 32px; height: 32px; border-radius: 8px; border: 1px solid var(--line); background: none; cursor: pointer; color: var(--muted); font-size: 18px; line-height: 1; }
+  .close:hover { color: var(--text); border-color: var(--muted); }
+  .d-body { display: grid; grid-template-columns: 200px 1fr; min-height: 0; }
+  .files { border-right: 1px solid var(--line); padding: 14px 10px; overflow-y: auto; }
+  .files .group { font-size: 10px; text-transform: uppercase; letter-spacing: .08em; color: var(--faint); margin: 12px 8px 4px; }
+  .files .group:first-child { margin-top: 0; }
+  .file { display: flex; align-items: center; gap: 8px; width: 100%; text-align: left; background: none; border: 0; border-radius: 6px; padding: 5px 8px; cursor: pointer; font-family: var(--mono); font-size: 12px; color: var(--muted); }
+  .file:hover { background: var(--card); color: var(--text); }
+  .file.on { background: var(--card-hover); color: var(--text); }
+  .file .rn { display: none; }
+  .file .v { width: 6px; height: 6px; border-radius: 50%; background: var(--faint); flex: none; }
+  .v.good { background: var(--pass); } .v.warn { background: var(--changes); } .v.stop { background: var(--human); }
+  .doc { overflow-y: auto; padding: 22px 28px 60px; min-width: 0; }
+
+  /* Rendered markdown */
+  .md { max-width: 680px; line-height: 1.65; }
+  .md h1, .md h2, .md h3, .md h4 { line-height: 1.3; margin: 1.6em 0 .5em; }
+  .md h1 { font-size: 20px; } .md h2 { font-size: 15px; } .md h3 { font-size: 14px; color: var(--muted); }
+  .md > :first-child { margin-top: 0; }
+  .md p, .md ul, .md ol, .md blockquote, .md pre, .md table { margin: 0 0 .9em; }
+  .md ul, .md ol { padding-left: 1.3em; }
+  .md li { margin: .2em 0; }
+  .md li.task { list-style: none; margin-left: -1.3em; }
+  .md li.task::before { content: "☐"; margin-right: .5em; color: var(--faint); }
+  .md li.task.done::before { content: "☑"; color: var(--pass); }
+  .md code { font-family: var(--mono); font-size: 12px; background: var(--card); padding: 1px 5px; border-radius: 4px; }
+  .md pre { background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; overflow-x: auto; }
+  .md pre code { background: none; padding: 0; }
+  .md blockquote { border-left: 2px solid var(--line); padding-left: 12px; color: var(--muted); }
+  .md a { color: var(--active); }
+  .md table { border-collapse: collapse; font-size: 13px; display: block; overflow-x: auto; }
+  .md th, .md td { border: 1px solid var(--line); padding: 5px 9px; text-align: left; }
+  .verdict { display: inline-block; font-family: var(--mono); font-size: 12px; font-weight: 600; padding: 4px 10px; border-radius: 6px; margin-bottom: 14px; }
+  .verdict + * { margin-top: .4em; }
+  .md .head { font-family: var(--mono); font-size: 12px; color: var(--muted); margin: -6px 0 14px; white-space: pre-line; }
+  .verdict.good { color: var(--pass); background: color-mix(in srgb, var(--pass) 14%, transparent); }
+  .verdict.warn { color: var(--changes); background: color-mix(in srgb, var(--changes) 16%, transparent); }
+  .verdict.stop { color: var(--human); background: color-mix(in srgb, var(--human) 16%, transparent); }
+  .note { color: var(--faint); font-size: 13px; }
+  .md .summary { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 12px 16px 4px; margin: 0 0 22px; }
+  .md .summary h2 { margin: 0 0 6px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
+  .md .summary ul { margin: 0 0 .6em; }
+  .md .front { font-family: var(--mono); font-size: 11px; color: var(--muted); white-space: pre-line; margin: 0 0 12px; padding-bottom: 8px; border-bottom: 1px solid var(--line); }
+
+  footer { padding: 4px 28px 28px; font-family: var(--mono); font-size: 11px; color: var(--faint); display: flex; gap: 20px; flex-wrap: wrap; }
+
+  @media (max-width: 1100px) {
+    .board { grid-template-columns: repeat(4, minmax(160px, 1fr)); row-gap: 28px; }
+    .p-grid { grid-template-columns: 1fr; }
+  }
+  @media (max-width: 640px) {
+    header { padding: 12px 16px; }
+    .banner { margin: 12px 16px 0; }
+    .ready, .prd-form, .programs { padding-left: 16px; padding-right: 16px; }
+    .board { grid-template-columns: 1fr; padding: 16px 16px 32px; }
+    .p-head .right { margin-left: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+    footer { padding: 0 16px 24px; }
+    .d-head { padding: 16px; }
+    .d-body { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
+    .files { border-right: 0; border-bottom: 1px solid var(--line); display: flex; gap: 4px; overflow-x: auto; padding: 8px; }
+    .files .group { display: none; }
+    .file { width: auto; white-space: nowrap; }
+    .file .rn { display: inline; white-space: pre; }
+    .doc { padding: 18px 16px 48px; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>Software factory</h1>
+  <div class="status" id="status">connecting…</div>
+</header>
+<div class="ready" id="ready"></div>
+<details class="prd-form" id="new-prd" hidden>
+  <summary>New PRD</summary>
+  <form id="prd-form">
+    <input name="title" required placeholder="Program title">
+    <textarea name="prd" required placeholder="Paste the PRD. Research starts when you submit it. You approve the enriched PRD and the ticket list before anything is filed."></textarea>
+    <button class="btn primary" type="submit">Start research</button>
+  </form>
+</details>
+<section class="programs" id="programs"></section>
+<div id="banner"></div>
+<main class="board" id="board"></main>
+<footer>
+  <span>factory/bin/board</span>
+  <span>factory/bin/program</span>
+  <span>factory/bin/run</span>
+  <span id="totals"></span>
+</footer>
+
+<div id="overlay">
+  <div class="scrim" data-close></div>
+  <aside class="drawer" role="dialog" aria-modal="true" aria-labelledby="d-title">
+    <div class="d-head">
+      <div class="num" id="d-num"></div>
+      <h3 id="d-title"></h3>
+      <div class="links" id="d-links"></div>
+      <button class="close" data-close aria-label="Close">×</button>
+    </div>
+    <div class="d-body">
+      <nav class="files" id="d-files"></nav>
+      <article class="doc"><div class="md" id="d-doc"></div></article>
+    </div>
+  </aside>
+</div>
+
+<script>
+const POLL_MS = 2000
+const COLUMNS = [
+  { label: 'Intake', who: 'intake · omp smol', stages: ['intake', 'needs-info'] },
+  { label: 'Spec', who: 'spec-writer · omp slow', stages: ['spec'] },
+  { label: 'Build', who: 'builder · gate', stages: ['build', 'gate'] },
+  { label: 'Review', who: 'routed omp reviewers', stages: ['review'] },
+  { label: 'Approve', who: 'approver · merge', stages: ['approve', 'merging'] },
+  { label: 'Needs human', who: 'you', stages: ['needs-human'], cls: 'human' },
+  { label: 'Done', who: 'merged · rejected', stages: ['merged', 'rejected'], cls: 'merged-col' },
+]
+const STAGES = new Set(COLUMNS.flatMap((c) => c.stages))
+const LIVE = new Set(['intake', 'spec', 'build', 'gate', 'review', 'approve', 'merging'])
+const SHORT = { code: 'code', ux: 'ux', ui: 'ui', security: 'sec' }
+
+const $ = (id) => document.getElementById(id)
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) =>
+  ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c])
+
+let jobs = []
+let programs = []
+let config = {}
+let apiMode = false
+let lastRender = ''
+let lastPrograms = ''
+let lastReady = ''
+const roundCache = new Map()
+const lastLines = new Map()
+let openJobId = null
+let openPath = null
+let openText = null
+const programTab = new Map()   // program id -> document file
+const docCache = new Map()     // "programs/<id>/<file>" -> text
+let readinessAt = 0
+
+async function fetchText(url) {
+  const res = await fetch(url, { cache: 'no-store' })
+  if (!res.ok) throw new Error(`${url}: HTTP ${res.status}`)
+  return res.text()
+}
+
+async function fetchFirst(url) {
+  try { return (await fetchText(url)).split('\n')[0].trim() } catch { return null }
+}
+
+async function fetchLast(url) {
+  try {
+    const lines = (await fetchText(url)).trimEnd().split('\n').filter((l) => l.trim() && !l.startsWith('$ '))
+    return lines[lines.length - 1] || ''
+  } catch { return '' }
+}
+
+async function postJSON(url, body) {
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body || {}),
+  })
+  const text = await res.text()
+  if (!res.ok) {
+    let msg = text
+    try { msg = JSON.parse(text).error || text } catch {}
+    throw new Error(msg || `HTTP ${res.status}`)
+  }
+  return text ? JSON.parse(text) : {}
+}
+
+// Keep what the user typed across re-renders.
+function withInputs(container, fn) {
+  const saved = new Map()
+  container.querySelectorAll('textarea[data-key], input[data-key]').forEach((el) => saved.set(el.dataset.key, el.value))
+  const openDetails = new Set([...container.querySelectorAll('details[data-key][open]')].map((el) => el.dataset.key))
+  fn()
+  container.querySelectorAll('textarea[data-key], input[data-key]').forEach((el) => {
+    if (saved.has(el.dataset.key)) el.value = saved.get(el.dataset.key)
+  })
+  container.querySelectorAll('details[data-key]').forEach((el) => { if (openDetails.has(el.dataset.key)) el.open = true })
+}
+
+// ---- Readiness -----------------------------------------------------------
+
+async function renderReadiness() {
+  if (!apiMode || Date.now() - readinessAt < 30000) return
+  readinessAt = Date.now()
+  try {
+    const res = await fetch('/api/readiness', { cache: 'no-store' })
+    const data = await res.json()
+    const html = (data.checks || []).map((c) =>
+      `<span class="${c.ok ? 'ok' : 'bad'}" title="${esc(c.hint)}">${c.ok ? '✓' : '!'} ${esc(c.name)}</span>`).join('')
+    if (html !== lastReady) { lastReady = html; $('ready').innerHTML = html }
+  } catch {}
+}
+
+// ---- Jobs board ----------------------------------------------------------
+
+function verdictOf(line) {
+  if (line === null) return 'pending'
+  const m = line.match(/^(?:VERDICT|GATE):\s*(PASS|CHANGES|FAIL)$/)
+  return m ? m[1] : 'invalid'
+}
+
+async function roundVerdicts(job, n) {
+  const key = `${job.id}/${n}`
+  if (roundCache.has(key)) return roundCache.get(key)
+  const dir = `jobs/${job.id}/round-${n}/`
+  const v = { gate: verdictOf(await fetchFirst(dir + 'checks.md')), reviews: {} }
+  if (v.gate === 'PASS') {
+    await Promise.all(Object.keys(job.agents?.reviewers || {}).map(async (r) => {
+      v.reviews[r] = verdictOf(await fetchFirst(`${dir}review-${r}.md`))
+    }))
+  }
+  const settled = v.gate === 'FAIL' || (v.gate === 'PASS' && Object.values(v.reviews).every((x) => x === 'PASS' || x === 'CHANGES'))
+  if (settled && n < job.round) roundCache.set(key, v)
+  return v
+}
+
+function chip(label, v, waiting, title, extra = '') {
+  const cls = ['PASS', 'CHANGES', 'FAIL'].includes(v) ? v : v === 'pending' ? (waiting ? 'wait' : '') : 'bad'
+  return `<span class="chip ${extra} ${cls}" title="${esc(title)}: ${esc(v)}">${esc(label)}</span>`
+}
+
+function roundRow(job, n, v) {
+  const current = n === job.round
+  const cells = [chip('gate', v.gate, current && job.stage === 'gate', 'gate', 'gate')]
+  if (v.gate === 'PASS') {
+    for (const r of Object.keys(job.agents.reviewers)) {
+      cells.push(chip(SHORT[r] || r, v.reviews[r], current && job.stage === 'review', r))
+    }
+  }
+  return `<div class="round"><span class="r">R${n}</span>${cells.join('')}</div>`
+}
+
+function elapsed(job) {
+  const end = job.ended ? new Date(job.ended) : new Date()
+  const min = Math.max(0, Math.floor((end - new Date(job.started)) / 60000))
+  return min >= 60 ? `${Math.floor(min / 60)}h${String(min % 60).padStart(2, '0')}m` : `${min}m`
+}
+
+const link = (url, text) =>
+  url ? `<a href="${esc(url)}" target="_blank" rel="noopener">${text}</a>` : `<span>${text}</span>`
+
+function links(job) {
+  const out = [link(job.issue_url, `issue #${job.issue}`)]
+  if (job.pr) out.push(link(job.pr_url, `PR #${job.pr}`))
+  return out.join('')
+}
+
+// The log file an agent is writing right now, so a live card shows its last line.
+function liveLog(job) {
+  const role = { intake: 'intake', spec: 'spec-writer', build: 'builder', approve: 'approver' }[job.stage]
+  if (!role) return null
+  return `jobs/${job.id}/logs/${role}-r${job.round || 0}.log`
+}
+
+function card(job, rounds) {
+  const live = LIVE.has(job.stage)
+  const human = job.stage === 'needs-human'
+  const asked = job.stage === 'needs-info'
+  const done = job.stage === 'merged' || job.stage === 'rejected'
+  const [num, ...slug] = job.id.split('-')
+  const flag = human ? '<span class="flag">your call</span>'
+    : asked ? '<span class="flag">answer needed</span>'
+    : job.stage === 'rejected' ? '<span class="flag wait">rejected</span>' : ''
+  const risk = job.intake?.risk
+  const meta = [
+    risk ? `<span class="risk-${esc(risk)}">${esc(risk)}</span>` : '',
+    `<span>$${Number(job.cost_usd).toFixed(4)}</span>`,
+    job.tokens ? `<span>${Number(job.tokens).toLocaleString()} tok</span>` : '',
+    `<span>${elapsed(job)}</span>`,
+  ].join('')
+  const last = live ? lastLines.get(job.id) : ''
+  let form = ''
+  if (apiMode && human) {
+    form = `<div class="form" data-stop>
+      <textarea data-key="fb-${job.issue}" placeholder="What should the builder change? Leave empty to merge as is."></textarea>
+      <div class="row">
+        ${job.pr ? `<button class="btn primary" data-act="merge" data-issue="${job.issue}">Merge PR #${job.pr}</button>` : ''}
+        <button class="btn" data-act="feedback" data-issue="${job.issue}" data-from="fb-${job.issue}">Send back</button>
+        <button class="btn danger" data-act="reject" data-issue="${job.issue}" data-from="fb-${job.issue}">Reject</button>
+      </div></div>`
+  } else if (apiMode && asked) {
+    form = `<div class="form" data-stop>
+      <textarea data-key="an-${job.issue}" placeholder="Answer intake's question. It is posted on the issue and intake runs again."></textarea>
+      <div class="row">
+        <button class="btn primary" data-act="answer" data-issue="${job.issue}" data-from="an-${job.issue}">Answer</button>
+        <button class="btn danger" data-act="reject" data-issue="${job.issue}" data-from="an-${job.issue}">Reject</button>
+      </div></div>`
+  }
+  return `
+    <article class="card ${live ? 'live' : ''} ${human ? 'human' : ''} ${done ? 'done' : ''} ${job.stage}"
+             data-job="${esc(job.id)}" tabindex="0">
+      <div class="card-top">
+        ${live ? '<span class="pulse" aria-label="running"></span>' : ''}
+        <span class="num">${esc(num)} · ${esc(slug.join('-'))}</span>
+        ${flag}
+      </div>
+      <p class="feature">${esc(job.title)}</p>
+      <div class="links">${links(job)}</div>
+      ${rounds.length ? `<div class="rounds">${rounds.join('')}</div>` : ''}
+      <div class="meta">${meta}</div>
+      ${last ? `<div class="lastline" title="${esc(last)}">${esc(last)}</div>` : ''}
+      ${form}
+    </article>`
+}
+
+async function render() {
+  const problems = []
+  const cards = new Map(COLUMNS.map((c) => [c, []]))
+  await Promise.all(jobs.filter((j) => LIVE.has(j.stage)).map(async (j) => {
+    const path = liveLog(j)
+    if (path) lastLines.set(j.id, (await fetchLast(path)).slice(0, 160))
+  }))
+  for (const job of jobs) {
+    if (!STAGES.has(job.stage)) { problems.push(`Job ${job.id} has unknown stage "${job.stage}"`); continue }
+    const rounds = []
+    for (let n = 1; n <= job.round; n++) rounds.push(roundRow(job, n, await roundVerdicts(job, n)))
+    cards.get(COLUMNS.find((c) => c.stages.includes(job.stage))).push(card(job, rounds))
+  }
+  const html = jobs.length ? COLUMNS.map((c) => `
+    <section class="col ${c.cls || ''}">
+      <div class="col-head">
+        <h2>${c.label}</h2><span class="who">${c.who}</span>
+        <span class="count">${cards.get(c).length || ''}</span>
+      </div>
+      ${cards.get(c).reverse().join('') || '<div class="empty">—</div>'}
+    </section>`).join('')
+    : `<section class="board-empty"><h2>Jobs</h2><p>Nothing is building yet. File the tickets and each pull request shows up here.</p></section>`
+  const banner = problems.map((p) => `<div class="banner">${esc(p)}</div>`).join('')
+  if (html + banner !== lastRender) {
+    lastRender = html + banner
+    withInputs($('board'), () => { $('board').innerHTML = html })
+    $('banner').innerHTML = banner
+  }
+  const running = jobs.filter((j) => LIVE.has(j.stage)).length
+  const cost = jobs.reduce((sum, j) => sum + Number(j.cost_usd), 0)
+  const tokens = jobs.reduce((sum, j) => sum + Number(j.tokens || 0), 0)
+  $('totals').textContent = `${running} running · ${tokens.toLocaleString()} tokens · $${cost.toFixed(4)}`
+}
+
+// ---- Programs ------------------------------------------------------------
+
+const PROGRAM_LABEL = {
+  research: 'Researching the repository',
+  'review-prd': 'Enriched PRD waits for your approval',
+  plan: 'Writing engineering tickets',
+  'review-tickets': 'Ticket list waits for your approval',
+  implementing: 'Building ready tickets',
+  release: 'Release note waits for your acceptance',
+  done: 'Released',
+}
+const YOU = new Set(['review-prd', 'review-tickets', 'release'])
+const DONE_STAGES = new Set(['merged', 'rejected'])
+
+function programDocs(program) {
+  const docs = [
+    ['prd.enriched.md', 'Enriched PRD'],
+    ['research.md', 'Research'],
+    ['prd.md', 'PRD'],
+    ['tickets.md', 'Tickets'],
+  ]
+  for (const c of program.changes || []) docs.push([c.file, `Change ${c.n}`])
+  for (const d of program.decisions || []) docs.push([d.file, `Decision ${d.n}`])
+  if (program.release) docs.push(['release.md', 'Release'])
+  return docs
+}
+
+function defaultTab(program) {
+  if (program.stage === 'review-tickets') return 'tickets.md'
+  if (program.stage === 'release' || program.stage === 'done') return 'release.md'
+  if (program.stage === 'research' && !(program.log || []).some((e) => e.event === 'PRD approved')) return 'prd.md'
+  return 'prd.enriched.md'
+}
+
+function ticketState(program, ticket, jobsByIssue) {
+  if (ticket.status === 'superseded') return ['superseded', '']
+  if (!ticket.issue) return [program.stage === 'review-tickets' && ticket.change ? ticket.change : 'not filed', '']
+  const job = jobsByIssue.get(ticket.issue)
+  if (job) {
+    if (job.stage === 'merged') return [`merged${job.pr ? ` · PR #${job.pr}` : ''}`, 'merged']
+    if (job.stage === 'rejected') return ['rejected', '']
+    if (job.stage === 'needs-human') return ['your call', 'you']
+    if (job.stage === 'needs-info') return ['answer needed', 'you']
+    return [`${job.stage}${job.round ? ` r${job.round}` : ''}`, 'running']
+  }
+  const open = new Set((program.decisions || []).filter((d) => d.status === 'proposed').map((d) => d.ticket))
+  if (open.has(ticket.n)) return ['waiting for a decision', 'you']
+  const byN = new Map((program.tickets || []).map((t) => [t.n, t]))
+  const settled = (n) => {
+    const t = byN.get(n)
+    if (!t) return true
+    if (t.status === 'superseded') return true
+    const j = t.issue && jobsByIssue.get(t.issue)
+    return !!(j && DONE_STAGES.has(j.stage))
+  }
+  const waiting = (ticket.depends || []).filter((n) => !settled(n))
+  if (waiting.length) return [`waiting on ${waiting.join(', ')}`, '']
+  return ['ready', 'ready']
+}
+
+function programCard(program) {
+  const jobsByIssue = new Map(jobs.map((j) => [j.issue, j]))
+  const tab = programTab.get(program.id) || defaultTab(program)
+  const docs = programDocs(program)
+  const tabs = docs.map(([file, label]) =>
+    `<button class="tab ${file === tab ? 'on' : ''}" data-tab="${esc(file)}" data-id="${esc(program.id)}">${esc(label)}</button>`).join('')
+  const tickets = (program.tickets || []).map((t) => {
+    const [state, cls] = ticketState(program, t, jobsByIssue)
+    const label = t.issue ? `#${t.issue} ${t.title}` : t.title
+    const href = t.url ? ` href="${esc(t.url)}" target="_blank" rel="noopener"` : ''
+    const kind = t.kind && t.kind !== 'feature' ? `<span class="kind">${esc(t.kind)}</span>` : ''
+    const touches = t.touches?.length ? ` title="Touches: ${esc(t.touches.join(', '))}"` : ''
+    return `<li class="${t.status}"${touches}><span class="n">${t.n}</span><a${href}>${esc(label)}</a>${kind}<span class="st ${cls}">${esc(state)}</span></li>`
+  }).join('')
+  const open = (program.decisions || []).filter((d) => d.status === 'proposed')
+  const decisions = open.map((d) => `
+    <div class="decision">
+      <p><strong>Decision ${d.n}</strong> · ticket ${d.ticket}<br>${esc(d.question)}</p>
+      <div class="form">
+        <textarea rows="3" data-key="dec-${program.id}-${d.n}" placeholder="Your decision and why. It becomes the ADR and is posted on the ticket."></textarea>
+        <div class="row"><button class="btn primary" data-act="decide" data-id="${esc(program.id)}" data-n="${d.n}" data-from="dec-${program.id}-${d.n}">Record decision</button></div>
+      </div>
+    </div>`).join('')
+  const you = YOU.has(program.stage) || open.length > 0
+  const busy = program.running
+
+  const buttons = []
+  if (program.stage === 'review-prd') {
+    buttons.push(`<div class="form">
+      <textarea data-key="rev-${program.id}" placeholder="Optional: what research should change before you approve."></textarea>
+      <div class="row">
+        <button class="btn primary" data-act="approve-prd" data-id="${esc(program.id)}">Approve PRD</button>
+        <button class="btn" data-act="revise-prd" data-id="${esc(program.id)}" data-from="rev-${program.id}" data-required>Send back</button>
+      </div></div>`)
+  }
+  if (program.stage === 'review-tickets') {
+    const summary = (program.tickets || []).reduce((acc, t) => { acc[t.change || 'new'] = (acc[t.change || 'new'] || 0) + 1; return acc }, {})
+    const words = Object.entries(summary).map(([k, v]) => `${v} ${k}`).join(', ')
+    buttons.push(`<div class="form">
+      <div class="waiting">${esc(words)}. Filing creates one GitHub issue per new ticket, comments on changed ones, and closes superseded ones. A change of mind goes in the change request below.</div>
+      <div class="row">
+        <button class="btn primary" data-act="approve-tickets" data-id="${esc(program.id)}">File tickets on GitHub</button>
+      </div></div>`)
+  }
+  if (program.stage === 'release') {
+    buttons.push(`<div class="row actions">
+      <button class="btn primary" data-act="accept-release" data-id="${esc(program.id)}">Accept release</button>
+    </div>`)
+  }
+  if (!busy && (program.stage === 'implementing' || ((program.stage === 'research' || program.stage === 'plan') && program.error))) {
+    const label = program.stage === 'implementing' ? 'Continue' : program.stage === 'plan' ? 'Retry planning' : 'Retry research'
+    buttons.push(`<div class="row actions"><button class="btn" data-act="continue" data-id="${esc(program.id)}">${label}</button></div>`)
+  }
+  const canChange = !busy && ['review-prd', 'review-tickets', 'implementing', 'release', 'done'].includes(program.stage)
+  const changeForm = canChange ? `
+    <details data-key="chg-open-${program.id}">
+      <summary class="btn" style="display:inline-block">Change request</summary>
+      <div class="form">
+        <textarea data-key="chg-${program.id}" placeholder="What should change? First line is the title. Research reruns, then the planner diffs the ticket list for your approval."></textarea>
+        <div class="row"><button class="btn primary" data-act="change" data-id="${esc(program.id)}" data-from="chg-${program.id}" data-required>Submit change request</button></div>
+      </div>
+    </details>` : ''
+  const log = (program.log || []).slice(-4).reverse().map((e) =>
+    `<div><span>${esc(e.at.slice(0, 16).replace('T', ' '))}</span> ${esc(e.by)} · ${esc(e.event)}${e.note ? ` · ${esc(e.note.slice(0, 80))}` : ''}</div>`).join('')
+
+  return `<article class="program ${you ? 'waiting-you' : ''}" data-program="${esc(program.id)}">
+    <div class="p-head">
+      <h2>${esc(program.title)}</h2>
+      <span class="stage ${you ? 'you' : ''}">${esc(PROGRAM_LABEL[program.stage] || program.stage)}</span>
+      ${busy ? '<span class="running">● running</span>' : ''}
+      <span class="right">${esc(program.id)} · ${esc(config.docs_dir || 'docs/programs')}/${esc(program.id)}/</span>
+    </div>
+    ${program.error ? `<div class="error">${esc(program.error)}</div>` : ''}
+    ${program.waiting && program.stage === 'implementing' ? `<div class="waiting">${esc(program.waiting)}</div>` : ''}
+    ${busy ? `<div class="lastline" data-plog="programs/${esc(program.id)}/logs/${program.stage === 'plan' ? 'planner' : program.stage === 'research' ? 'researcher' : 'program'}.log" title="Last line of the role log"></div>` : ''}
+    <div class="p-grid">
+      <div>
+        <nav class="tabs">${tabs}</nav>
+        <div class="p-doc md" data-doc="${esc(program.id)}" data-file="${esc(tab)}"><p class="note">Loading…</p></div>
+        ${buttons.join('')}
+        ${decisions}
+        ${changeForm}
+      </div>
+      <aside class="side">
+        ${tickets ? `<section><h3>Tickets</h3><ul class="tickets">${tickets}</ul></section>` : ''}
+        ${log ? `<section><h3>Consent log</h3><div class="log">${log}</div></section>` : ''}
+      </aside>
+    </div>
+  </article>`
+}
+
+async function renderPrograms() {
+  const html = programs.map(programCard).join('')
+  if (html !== lastPrograms) {
+    lastPrograms = html
+    withInputs($('programs'), () => { $('programs').innerHTML = html })
+  }
+  await Promise.all([...document.querySelectorAll('[data-doc]')].map(async (el) => {
+    const url = `programs/${el.dataset.doc}/${el.dataset.file}`
+    let text
+    try { text = await fetchText(url) } catch { text = null }
+    const key = url
+    if (text === docCache.get(key) && el.dataset.loaded) return
+    docCache.set(key, text)
+    el.dataset.loaded = '1'
+    el.innerHTML = text === null ? '<p class="note">Not written yet.</p>' : markdown(text)
+  }))
+  await Promise.all([...document.querySelectorAll('[data-plog]')].map(async (el) => {
+    const line = await fetchLast(el.dataset.plog)
+    if (line && el.textContent !== line) el.textContent = line
+  }))
+}
+
+// ---- Poll ----------------------------------------------------------------
+
+async function poll() {
+  const status = $('status')
+  try {
+    try {
+      const res = await fetch('/api/state', { cache: 'no-store' })
+      if (!res.ok) throw new Error('no api')
+      const data = await res.json()
+      apiMode = true
+      jobs = data.jobs || []
+      programs = data.programs || []
+      config = data.config || {}
+      $('new-prd').hidden = false
+      await renderPrograms()
+      await renderReadiness()
+    } catch (err) {
+      if (apiMode) throw err
+      jobs = await loadJobs()
+      programs = []
+    }
+    await render()
+    if (openJobId) await refreshDrawer()
+    status.className = 'status'
+    status.innerHTML = `<span class="dot"></span>${apiMode ? 'board' : 'jobs/'} · ${new Date().toLocaleTimeString()}`
+  } catch (err) {
+    status.className = 'status error'
+    status.innerHTML = `<span class="dot"></span>${esc(err.message)}`
+  }
+}
+
+async function loadJobs() {
+  let listing
+  try { listing = await fetchText('jobs/') } catch { return [] }
+  const doc = new DOMParser().parseFromString(listing, 'text/html')
+  const ids = [...doc.querySelectorAll('a')]
+    .map((a) => decodeURIComponent(a.getAttribute('href')))
+    .filter((h) => h.endsWith('/'))
+    .map((h) => h.slice(0, -1))
+    .sort()
+  return Promise.all(ids.map(async (id) => JSON.parse(await fetchText(`jobs/${id}/job.json`))))
+}
+
+// ---- Drawer --------------------------------------------------------------
+
+async function listFiles(dir) {
+  const doc = new DOMParser().parseFromString(await fetchText(dir), 'text/html')
+  const hrefs = [...doc.querySelectorAll('a')].map((a) => decodeURIComponent(a.getAttribute('href')))
+  const out = []
+  for (const h of hrefs) {
+    if (h.endsWith('/')) out.push(...(await listFiles(dir + h)).map((f) => h + f))
+    else if (h.endsWith('.md')) out.push(h)
+  }
+  return out
+}
+
+const ORDER = ['issue.md', 'intake.md', 'spec.md', 'build.md', 'decision.md', 'rejection.md']
+const ROUND_ORDER = ['checks', 'review-code', 'review-security', 'review-ux', 'review-ui', 'merge-checks']
+
+function fileRank(path) {
+  if (ORDER.includes(path)) return [0, ORDER.indexOf(path), path]
+  const round = path.match(/^round-(\d+)\/(.+)\.md$/)
+  if (round) return [2, Number(round[1]) * 10 + ROUND_ORDER.indexOf(round[2]), path]
+  return [1, 0, path]
+}
+
+function sortFiles(files) {
+  return files.sort((a, b) => {
+    const [x, y] = [fileRank(a), fileRank(b)]
+    return x[0] - y[0] || x[1] - y[1] || x[2].localeCompare(y[2])
+  })
+}
+
+function tone(first) {
+  if (/^(VERDICT:\s*PASS|GATE:\s*PASS|APPROVE|STATUS:\s*READY|DECISION:\s*ACCEPT)$/.test(first)) return 'good'
+  if (/^(VERDICT:\s*CHANGES|DECISION:\s*NEEDS-INFO)$/.test(first)) return 'warn'
+  if (/^(ESCALATE|REJECTED|STATUS:\s*BLOCKED|GATE:\s*FAIL|DECISION:\s*REJECT)$/.test(first)) return 'stop'
+  return null
+}
+
+const firstLines = new Map()
+
+async function refreshDrawer() {
+  const job = jobs.find((j) => j.id === openJobId)
+  if (!job) return
+  $('d-num').textContent = `${job.id} · ${job.stage}${job.round ? ` · round ${job.round}` : ''} · ${(job.tokens || 0).toLocaleString()} tok · $${Number(job.cost_usd).toFixed(4)} · ${elapsed(job)}`
+  $('d-title').textContent = job.title
+  $('d-links').innerHTML = links(job)
+
+  const base = `jobs/${job.id}/`
+  const files = sortFiles(await listFiles(base))
+  if (!openPath || !files.includes(openPath)) openPath = files[0] || null
+
+  let text = null
+  if (openPath) {
+    text = await fetchText(base + openPath)
+    firstLines.set(base + openPath, text.split('\n')[0].trim())
+  }
+  await Promise.all(files.filter((f) => !firstLines.has(base + f)).map(async (f) => {
+    firstLines.set(base + f, (await fetchText(base + f)).split('\n')[0].trim())
+  }))
+
+  let group = null
+  $('d-files').innerHTML = files.map((f) => {
+    const g = f.includes('/') ? f.split('/')[0].replace('round-', 'Round ') : 'Job'
+    const head = g !== group ? `<div class="group">${esc(g)}</div>` : ''
+    group = g
+    const round = f.match(/^round-(\d+)\//)
+    const name = round
+      ? `<span class="rn">R${round[1]} </span>${esc(f.split('/')[1].replace(/^review-|\.md$/g, ''))}`
+      : esc(f)
+    const t = tone(firstLines.get(base + f) || '')
+    return `${head}<button class="file ${f === openPath ? 'on' : ''}" data-file="${esc(f)}">
+      <span class="v ${t || ''}"></span>${name}</button>`
+  }).join('') || '<div class="empty">No files yet.</div>'
+
+  if (text !== openText) {
+    openText = text
+    $('d-doc').innerHTML = text === null ? '<p class="note">Intake hasn’t written anything yet.</p>' : markdown(text)
+  }
+}
+
+async function openDrawer(id) {
+  openJobId = id
+  openPath = null
+  openText = undefined
+  document.body.classList.add('open')
+  try {
+    await refreshDrawer()
+  } catch (err) {
+    $('d-doc').innerHTML = `<p class="note">${esc(err.message)}</p>`
+  }
+}
+
+function closeDrawer() {
+  openJobId = null
+  document.body.classList.remove('open')
+}
+
+// ---- Actions -------------------------------------------------------------
+
+function textFrom(button) {
+  const key = button.dataset.from
+  if (!key) return ''
+  const el = document.querySelector(`[data-key="${CSS.escape(key)}"]`)
+  return el ? el.value.trim() : ''
+}
+
+async function act(button) {
+  const { act, id, issue, n } = button.dataset
+  const text = textFrom(button)
+  if (button.hasAttribute('data-required') && !text) {
+    window.alert('Write a note first.')
+    return
+  }
+  button.disabled = true
+  try {
+    if (issue) {
+      if (act === 'merge') await postJSON(`/api/jobs/${issue}/merge`, {})
+      else if (act === 'feedback') {
+        if (!text) { window.alert('Say what the builder should change, or merge the PR.'); return }
+        await postJSON(`/api/jobs/${issue}/feedback`, { text })
+      } else if (act === 'answer') {
+        if (!text) { window.alert('Write the answer first.'); return }
+        await postJSON(`/api/jobs/${issue}/answer`, { text })
+      } else if (act === 'reject') {
+        const why = text || window.prompt('Why is this rejected? The reason is posted on the issue.')
+        if (!why) return
+        await postJSON(`/api/jobs/${issue}/reject`, { text: why })
+      }
+    } else if (act === 'decide') {
+      await postJSON(`/api/programs/${id}/decide/${n}`, { text })
+    } else {
+      await postJSON(`/api/programs/${id}/${act}`, { text })
+    }
+    const key = button.dataset.from
+    if (key) {
+      const el = document.querySelector(`[data-key="${CSS.escape(key)}"]`)
+      if (el) el.value = ''
+    }
+    lastPrograms = ''
+    lastRender = ''
+    await poll()
+  } catch (err) {
+    window.alert(err.message)
+  } finally {
+    button.disabled = false
+  }
+}
+
+document.addEventListener('click', async (e) => {
+  const tab = e.target.closest('[data-tab]')
+  if (tab) {
+    programTab.set(tab.dataset.id, tab.dataset.tab)
+    lastPrograms = ''
+    return renderPrograms()
+  }
+  const action = e.target.closest('[data-act]')
+  if (action) {
+    e.stopPropagation()
+    e.preventDefault()
+    return act(action)
+  }
+  if (e.target.closest('[data-stop]') || e.target.closest('textarea, input, details, summary')) return
+  if (e.target.closest('a')) return
+  const cardEl = e.target.closest('[data-job]')
+  if (cardEl) return openDrawer(cardEl.dataset.job)
+  const fileEl = e.target.closest('[data-file]')
+  if (fileEl && fileEl.closest('#d-files')) {
+    openPath = fileEl.dataset.file
+    openText = undefined
+    $('d-doc').parentElement.scrollTop = 0
+    return refreshDrawer()
+  }
+  if (e.target.closest('[data-close]')) closeDrawer()
+})
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') return closeDrawer()
+  if (e.target.closest?.('textarea, input')) return
+  const cardEl = e.target.closest?.('[data-job]')
+  if (cardEl && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); openDrawer(cardEl.dataset.job) }
+})
+
+// ---- Markdown (just enough for the factory's files) ---------------------
+
+function inline(s) {
+  const codes = []
+  s = esc(s).replace(/`([^`]+)`/g, (_, c) => `\u0000${codes.push(c) - 1}\u0000`)
+  s = s
+    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+    .replace(/(^|[^*])\*([^*\s][^*]*)\*/g, '$1<em>$2</em>')
+    .replace(/\[([^\]]+)\]\(((?:https?:\/\/|\.{0,2}\/|#)[^)\s]*)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
+  return s.replace(/\u0000(\d+)\u0000/g, (_, i) => `<code>${codes[i]}</code>`)
+}
+
+function splitSummary(lines) {
+  const start = lines.findIndex((l) => /^##\s+Summary\s*$/.test(l))
+  if (start === -1) return { lines, summary: null }
+  let end = start + 1
+  while (end < lines.length && !/^#{1,2}\s/.test(lines[end])) end++
+  return {
+    lines: [...lines.slice(0, start), ...lines.slice(end)],
+    summary: lines.slice(start + 1, end).join('\n'),
+  }
+}
+
+// `---` front matter (status, decided_by, …) renders as a small header block.
+function splitFront(lines) {
+  if (lines[0] !== '---') return { lines, front: null }
+  const end = lines.indexOf('---', 1)
+  if (end === -1) return { lines, front: null }
+  return { lines: lines.slice(end + 1), front: lines.slice(1, end).filter((l) => l.trim()).join('\n') }
+}
+
+function markdown(src) {
+  const fm = splitFront(src.replace(/\r/g, '').split('\n'))
+  const split = splitSummary(fm.lines)
+  const lines = split.lines
+  let i = 0
+  let html = ''
+  if (fm.front) html += `<div class="front">${esc(fm.front)}</div>`
+  const first = (lines[0] || '').trim()
+  const t = tone(first)
+  if (t) {
+    html += `<div class="verdict ${t}">${esc(first)}</div>`
+    i = 1
+    const extra = []
+    while (i < lines.length && /^[A-Z-]+:\s/.test(lines[i])) extra.push(lines[i++])
+    if (extra.length) html += `<div class="head">${esc(extra.join('\n'))}</div>`
+  }
+  if (split.summary !== null) html += `<section class="summary"><h2>Summary</h2>${markdown(split.summary)}</section>`
+
+  const isList = (l) => /^\s*([-*+]|\d+\.)\s+/.test(l)
+  const isBlockStart = (l) => /^(#{1,6}\s|```|\s*>|\|)/.test(l) || isList(l)
+
+  while (i < lines.length) {
+    const line = lines[i]
+    if (!line.trim()) { i++; continue }
+
+    if (line.startsWith('```')) {
+      const body = []
+      i++
+      while (i < lines.length && !lines[i].startsWith('```')) body.push(lines[i++])
+      i++
+      html += `<pre><code>${esc(body.join('\n'))}</code></pre>`
+      continue
+    }
+    const h = line.match(/^(#{1,6})\s+(.*)$/)
+    if (h) { const n = Math.min(h[1].length, 4); html += `<h${n}>${inline(h[2])}</h${n}>`; i++; continue }
+
+    if (/^\s*>/.test(line)) {
+      const body = []
+      while (i < lines.length && /^\s*>/.test(lines[i])) body.push(lines[i++].replace(/^\s*>\s?/, ''))
+      html += `<blockquote>${markdown(body.join('\n'))}</blockquote>`
+      continue
+    }
+    if (line.startsWith('|')) {
+      const rows = []
+      while (i < lines.length && lines[i].startsWith('|')) rows.push(lines[i++])
+      const cells = (r) => r.replace(/^\||\|$/g, '').split('|').map((c) => inline(c.trim()))
+      const body = rows.filter((r) => !/^\|[\s:|-]+\|$/.test(r))
+      html += '<table>' + body.map((r, n) => `<tr>${cells(r).map((c) => n ? `<td>${c}</td>` : `<th>${c}</th>`).join('')}</tr>`).join('') + '</table>'
+      continue
+    }
+    if (isList(line)) {
+      const ordered = /^\s*\d+\./.test(line)
+      const items = []
+      while (i < lines.length && (isList(lines[i]) || (/^\s{2,}\S/.test(lines[i]) && items.length))) {
+        const l = lines[i++]
+        if (isList(l)) items.push({ indent: l.match(/^\s*/)[0].length, text: l.replace(/^\s*([-*+]|\d+\.)\s+/, '') })
+        else items[items.length - 1].text += ' ' + l.trim()
+      }
+      const lis = items.map(({ indent, text }) => {
+        const task = text.match(/^\[([ xX])\]\s+(.*)$/)
+        const style = indent ? ` style="margin-left:${indent * 0.6}em"` : ''
+        return task
+          ? `<li class="task ${task[1] === ' ' ? '' : 'done'}"${style}>${inline(task[2])}</li>`
+          : `<li${style}>${inline(text)}</li>`
+      }).join('')
+      html += ordered ? `<ol>${lis}</ol>` : `<ul>${lis}</ul>`
+      continue
+    }
+    const para = []
+    while (i < lines.length && lines[i].trim() && !isBlockStart(lines[i])) para.push(lines[i++])
+    html += `<p>${inline(para.join(' '))}</p>`
+  }
+  return html
+}
+
+$('prd-form').addEventListener('submit', async (event) => {
+  event.preventDefault()
+  const data = new FormData(event.target)
+  try {
+    await postJSON('/api/programs', { title: data.get('title'), prd: data.get('prd') })
+    event.target.reset()
+    $('new-prd').open = false
+    lastPrograms = ''
+    await poll()
+  } catch (err) {
+    window.alert(err.message)
+  }
+})
+
+poll()
+setInterval(poll, POLL_MS)
+</script>
+</body>
+</html>

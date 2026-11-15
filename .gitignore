@@ -1,0 +1,6 @@
+/factory/jobs/
+/factory/programs/
+/factory/probe-results.json
+/.worktrees/
+node_modules/
+.DS_Store

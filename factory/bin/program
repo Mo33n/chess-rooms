@@ -1,0 +1,1405 @@
+#!/usr/bin/env python3
+"""A program takes one PRD from idea to release-ready code.
+
+Scripts own state in factory/programs/<id>/program.json. omp writes the
+research, the enriched PRD, and the ticket list. GitHub holds the tickets.
+factory/bin/run implements every ready ticket, `concurrency` at a time. Every
+document the program produces is published to docs/programs/<id>/ in the
+repository, with the consent log that says who accepted what and when.
+
+Stages: research → review-prd → plan → review-tickets → implementing → release → done.
+A change request sends a program back to research; the planner then diffs the
+ticket list instead of starting over.
+
+Usage:
+  program new <title>             stdin is the PRD markdown; prints the program id
+  program step <id>               research, plan, start ready tickets, or draft the release
+  program approve-prd <id>        enriched PRD accepted; planning can start
+  program revise-prd <id>         stdin is what to change; research runs again
+  program approve-tickets <id>    file new tickets on GitHub; close superseded ones
+  program change <id>             stdin is a change request; research reruns against it
+  program decide <id> <n>         stdin is the decision for open decision <n>
+  program accept-release <id>     release note accepted; the program is done
+  program refill                  label tickets a running drain just unlocked
+  program status                  JSON for every program
+"""
+
+import getpass
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import factorylog  # noqa: E402
+
+REPO = Path(os.environ.get("FACTORY_REPO") or Path(__file__).resolve().parents[2])
+FACTORY = REPO / "factory"
+CONFIG = json.loads((FACTORY / "config.json").read_text())
+PROGRAMS = FACTORY / "programs"
+BACKLOG = "factory:backlog"
+DOCS_DIR = CONFIG.get("docs_dir") or "docs/programs"
+
+TICKET_KINDS = {"feature", "contract", "spike"}
+TICKET_STATUS = {"planned", "superseded"}
+HEADER_KEYS = {"depends", "after", "touches", "kind", "status", "decision", "risk", "surfaces"}
+SURFACES = {"ui", "security"}
+RISKS = {"low", "medium", "high"}
+NONE_WORDS = {"none", "nothing", "n/a", "na", "-", ""}
+CHANGE_STAGES = {"review-prd", "review-tickets", "implementing", "release", "done"}
+
+STAGE_LABEL = {
+    "research": "Researching",
+    "review-prd": "Enriched PRD waits for your approval",
+    "plan": "Writing tickets",
+    "review-tickets": "Ticket list waits for your approval",
+    "implementing": "Building ready tickets",
+    "release": "Release note waits for your acceptance",
+    "done": "Released",
+}
+
+
+def die(msg, code=1):
+    print(f"program: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def now():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def today():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+def slug(title):
+    text = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
+    return (text[:40] or "program").strip("-")
+
+
+def operator():
+    """The person running the factory. GitHub login when gh is set up, else the OS user."""
+    name = os.environ.get("FACTORY_OPERATOR")
+    if name:
+        return name
+    if shutil.which("gh"):
+        result = subprocess.run(["gh", "api", "user", "--jq", ".login"], capture_output=True, text=True)
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+    return getpass.getuser()
+
+
+def program_path(program_id):
+    return PROGRAMS / program_id / "program.json"
+
+
+def load(program_id):
+    path = program_path(program_id)
+    if not path.exists():
+        die(f"no program {program_id}")
+    program = json.loads(path.read_text())
+    program.setdefault("tickets", [])
+    program.setdefault("changes", [])
+    program.setdefault("decisions", [])
+    program.setdefault("log", [])
+    program.setdefault("release", None)
+    return program
+
+
+def save(program):
+    folder = PROGRAMS / program["id"]
+    folder.mkdir(parents=True, exist_ok=True)
+    program["updated"] = now()
+    tmp = folder / "program.json.tmp"
+    tmp.write_text(json.dumps(program, indent=2) + "\n")
+    tmp.replace(folder / "program.json")  # the board reads this file while we write it
+    return program
+
+
+def trace(program_id, text):
+    """Debug trail for one program, separate from the consent log."""
+    factorylog.line(PROGRAMS / program_id / "logs" / "program.log", text)
+
+
+def log_event(program, event, note=""):
+    """The consent log: who did what, when. Published with the documents."""
+    program["log"].append({"at": now(), "by": operator(), "event": event, "note": note.strip()[:400]})
+
+
+# ---- Tickets ---------------------------------------------------------------
+
+
+def _refs(number, key, raw):
+    if raw.strip().lower() in NONE_WORDS:
+        return []
+    refs = []
+    for part in raw.split(","):
+        part = part.strip()
+        if not re.fullmatch(r"\d+", part):
+            raise ValueError(f"ticket {number} {key} {part!r} is not a ticket number")
+        refs.append(int(part))
+    return refs
+
+
+def _areas(raw):
+    if raw.strip().lower() in NONE_WORDS:
+        return []
+    return [part.strip() for part in raw.split(",") if part.strip()]
+
+
+def parse_tickets(text):
+    """Tickets are `## <n>. <title>` sections followed by a header block.
+
+    Depends: is required. After:, Touches:, Kind:, Status: and Decision: are
+    optional. The header ends at the first line that is not one of those keys.
+    """
+    chunks = re.split(r"(?m)^##\s+(\d+)\.\s+", text)
+    if len(chunks) < 3:
+        raise ValueError("tickets.md needs at least one '## 1. Title' section")
+    tickets = []
+    seen = set()
+    for index in range(1, len(chunks), 2):
+        number = int(chunks[index])
+        lines = chunks[index + 1].splitlines()
+        title = lines[0].strip()
+        if not title:
+            raise ValueError(f"ticket {number} has no title")
+        rest = lines[1:]
+        while rest and not rest[0].strip():
+            rest.pop(0)
+        fields = {}
+        while rest:
+            match = re.match(r"^([A-Za-z]+):\s*(.*)$", rest[0].strip())
+            if not match or match.group(1).lower() not in HEADER_KEYS:
+                break
+            fields[match.group(1).lower()] = match.group(2).strip()
+            rest.pop(0)
+        if "depends" not in fields:
+            raise ValueError(f"ticket {number} must start with a Depends: line")
+        kind = (fields.get("kind") or "feature").lower()
+        if kind not in TICKET_KINDS:
+            raise ValueError(f"ticket {number} Kind {kind!r} is not one of {', '.join(sorted(TICKET_KINDS))}")
+        status = (fields.get("status") or "planned").lower()
+        if status not in TICKET_STATUS:
+            raise ValueError(f"ticket {number} Status {status!r} is not one of {', '.join(sorted(TICKET_STATUS))}")
+        risk = (fields.get("risk") or "").lower() or None
+        if risk and risk not in RISKS:
+            raise ValueError(f"ticket {number} Risk {risk!r} is not one of {', '.join(sorted(RISKS))}")
+        surfaces = _areas(fields.get("surfaces", ""))
+        unknown = [item for item in surfaces if item not in SURFACES]
+        if unknown:
+            raise ValueError(f"ticket {number} Surfaces {unknown[0]!r} is not ui or security")
+        if number in seen:
+            raise ValueError(f"duplicate ticket number {number}")
+        seen.add(number)
+        tickets.append({
+            "n": number,
+            "title": title[:120],
+            "depends": _refs(number, "Depends", fields["depends"]),
+            "after": _refs(number, "After", fields.get("after", "none")),
+            "touches": _areas(fields.get("touches", "")),
+            "kind": kind,
+            "status": status,
+            "decision": (fields.get("decision") or "").strip() or None,
+            "risk": risk,
+            "surfaces": surfaces,
+            "body": "\n".join(rest).strip(),
+            "issue": None,
+            "url": None,
+        })
+    numbers = {ticket["n"] for ticket in tickets}
+    for ticket in tickets:
+        for key in ("depends", "after"):
+            missing = [ref for ref in ticket[key] if ref not in numbers]
+            if missing:
+                raise ValueError(f"ticket {ticket['n']} {key} missing ticket {missing[0]}")
+            if ticket["n"] in ticket[key]:
+                raise ValueError(f"ticket {ticket['n']} depends on itself")
+    if _cycles(tickets):
+        raise ValueError("ticket dependencies contain a cycle")
+    return tickets
+
+
+def _cycles(tickets):
+    graph = {ticket["n"]: ticket["depends"] + ticket["after"] for ticket in tickets}
+    visiting, visited = set(), set()
+
+    def walk(number):
+        if number in visiting:
+            return True
+        if number in visited:
+            return False
+        visiting.add(number)
+        for dep in graph.get(number, []):
+            if walk(dep):
+                return True
+        visiting.remove(number)
+        visited.add(number)
+        return False
+
+    return any(walk(number) for number in graph)
+
+
+def settled(ticket, done_issues):
+    """A ticket no later ticket has to wait for: merged, or dropped by a replan."""
+    return ticket["status"] == "superseded" or bool(ticket.get("issue") and ticket["issue"] in done_issues)
+
+
+def ready_tickets(tickets, done_issues, active_issues, blocked=frozenset(), rejected=frozenset()):
+    """Every filed ticket that can start now, in the order to start them.
+
+    A ticket is ready when each Depends: ticket has merged, no open decision
+    blocks it, and no running ticket claims one of its Touches: areas. A
+    rejected ticket never restarts and never settles its dependents; a change
+    request is the way past it. Tickets whose After: tickets have merged come
+    first.
+    """
+    by_number = {ticket["n"]: ticket for ticket in tickets}
+    claimed = set()
+    for ticket in tickets:
+        if ticket.get("issue") in active_issues:
+            claimed.update(ticket["touches"])
+    candidates = []
+    for ticket in tickets:
+        issue = ticket.get("issue")
+        if not issue or issue in done_issues or issue in active_issues or issue in rejected:
+            continue
+        if ticket["status"] == "superseded" or ticket["n"] in blocked:
+            continue
+        if not all(settled(by_number[dep], done_issues) for dep in ticket["depends"]):
+            continue
+        candidates.append(ticket)
+    candidates.sort(key=lambda item: (not all(settled(by_number[ref], done_issues) for ref in item["after"]), item["n"]))
+    ready = []
+    for ticket in candidates:
+        if claimed & set(ticket["touches"]):
+            continue
+        claimed.update(ticket["touches"])
+        ready.append(ticket)
+    return ready
+
+
+def next_ready(tickets, done_issues, active_issues, blocked=frozenset(), rejected=frozenset()):
+    ready = ready_tickets(tickets, done_issues, active_issues, blocked, rejected)
+    return ready[0] if ready else None
+
+
+def waiting_reason(ticket, tickets, done_issues, active_issues, blocked, rejected=frozenset()):
+    """One line that says why a filed ticket has not started."""
+    by_number = {item["n"]: item for item in tickets}
+    if ticket.get("issue") in rejected:
+        return f"ticket {ticket['n']} was rejected; send a change request"
+    if ticket["n"] in blocked:
+        return "waiting for a decision"
+    stuck = [str(dep) for dep in ticket["depends"] if by_number[dep].get("issue") in rejected]
+    if stuck:
+        return "blocked by rejected " + ", ".join(stuck)
+    pending = [str(dep) for dep in ticket["depends"] if not settled(by_number[dep], done_issues)]
+    if pending:
+        return "waiting on " + ", ".join(pending)
+    claimed = set()
+    for other in tickets:
+        if other.get("issue") in active_issues:
+            claimed.update(other["touches"])
+    overlap = sorted(claimed & set(ticket["touches"]))
+    if overlap:
+        return "area busy: " + ", ".join(overlap)
+    return "ready"
+
+
+def job_records():
+    """issue number → job.json for every factory job."""
+    records = {}
+    jobs = FACTORY / "jobs"
+    if not jobs.exists():
+        return records
+    for path in jobs.glob("*/job.json"):
+        job = json.loads(path.read_text())
+        if job.get("issue"):
+            records[int(job["issue"])] = job
+    return records
+
+
+def job_issue_stages():
+    return {issue: job.get("stage") for issue, job in job_records().items()}
+
+
+def sync_jobs():
+    """Let factory/bin/job notice pull requests merged on GitHub or the board.
+
+    `job queue` is the only thing that moves a job to `merged` after a person
+    merges the PR. Without it a merged ticket still looks like `needs-human`
+    here and its dependents never unlock.
+    """
+    if not shutil.which("gh"):
+        return
+    subprocess.run([sys.executable, str(FACTORY / "bin" / "job"), "queue"], cwd=REPO, capture_output=True, text=True)
+
+
+def finished_issues(stages):
+    return {number for number, stage in stages.items() if stage == "merged"}
+
+
+def rejected_issues(stages):
+    return {number for number, stage in stages.items() if stage == "rejected"}
+
+
+def active_issues(stages):
+    return {number for number, stage in stages.items() if stage not in {"merged", "rejected"}}
+
+
+def live_issues(stages):
+    """Jobs an agent may be working on right now."""
+    return {number for number, stage in stages.items()
+            if stage not in {"merged", "rejected", "needs-human", "needs-info"}}
+
+
+def open_decisions(program):
+    return {decision["ticket"] for decision in program["decisions"] if decision["status"] == "proposed"}
+
+
+# ---- Decisions (RFC → ADR) -------------------------------------------------
+
+
+def sync_decisions(program):
+    """One decision file per ticket that asks for one. Proposed until a person decides."""
+    folder = PROGRAMS / program["id"]
+    asks = {ticket["n"]: ticket.get("decision") for ticket in program["tickets"] if ticket["status"] != "superseded"}
+    # A replan that dropped or reworded the question withdraws a decision nobody has made yet.
+    for decision in program["decisions"]:
+        if decision["status"] == "proposed" and asks.get(decision["ticket"]) != decision["question"]:
+            decision["status"] = "withdrawn"
+            path = folder / decision["file"]
+            if path.exists():
+                path.write_text(re.sub(r"(?m)^status: .*$", "status: withdrawn", path.read_text(), count=1))
+    known = {decision["ticket"] for decision in program["decisions"] if decision["status"] != "withdrawn"}
+    for ticket in program["tickets"]:
+        question = ticket.get("decision")
+        if not question or ticket["n"] in known or ticket["status"] == "superseded":
+            continue
+        n = len(program["decisions"]) + 1
+        rel = f"decisions/{n:04d}-{slug(question)}.md"
+        options = section_text(ticket["body"], "Options")
+        text = (
+            f"---\nstatus: proposed\nticket: {ticket['n']}\nproposed_on: {today()}\n"
+            f"decided_by:\ndecided_on:\n---\n\n"
+            f"# {question}\n\n"
+            f"## Context\n\nTicket {ticket['n']}: {ticket['title']}\n\n{ticket['body']}\n\n"
+            f"## Options\n\n{options or 'The planner did not list options. Add them when you decide.'}\n\n"
+            f"## Decision\n\nPending.\n\n## Consequences\n\nPending.\n"
+        )
+        path = folder / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+        program["decisions"].append({
+            "n": n,
+            "ticket": ticket["n"],
+            "question": question,
+            "file": rel,
+            "status": "proposed",
+            "proposed_on": today(),
+            "decided_by": None,
+            "decided_on": None,
+            "decision": None,
+        })
+
+
+def section_text(text, heading):
+    lines = text.splitlines()
+    start = None
+    for index, line in enumerate(lines):
+        if line.strip().lower() == f"## {heading}".lower():
+            start = index + 1
+            break
+    if start is None:
+        return ""
+    body = []
+    for line in lines[start:]:
+        if line.startswith("## "):
+            break
+        body.append(line)
+    return "\n".join(body).strip()
+
+
+def decide(program, n, text):
+    text = text.strip()
+    if not text:
+        die("a decision needs text")
+    match = next((item for item in program["decisions"] if item["n"] == n), None)
+    if match is None:
+        die(f"{program['id']} has no decision {n}")
+    if match["status"] != "proposed":
+        die(f"decision {n} is already {match['status']}")
+    path = PROGRAMS / program["id"] / match["file"]
+    body = path.read_text() if path.exists() else f"# {match['question']}\n"
+    body = re.sub(r"(?m)^status: .*$", "status: accepted", body, count=1)
+    body = re.sub(r"(?m)^decided_by:.*$", f"decided_by: {operator()}", body, count=1)
+    body = re.sub(r"(?m)^decided_on:.*$", f"decided_on: {today()}", body, count=1)
+    if "## Decision\n\nPending." in body:
+        body = body.replace("## Decision\n\nPending.", f"## Decision\n\n{text}", 1)
+    else:
+        body = body.rstrip("\n") + f"\n\n## Decision\n\n{text}\n"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(body)
+    match.update({"status": "accepted", "decided_by": operator(), "decided_on": today(), "decision": text})
+    log_event(program, f"decision {n} accepted", match["question"])
+    ticket = next((item for item in program["tickets"] if item["n"] == match["ticket"]), None)
+    if ticket and ticket.get("issue") and shutil.which("gh"):
+        subprocess.run(
+            ["gh", "issue", "comment", str(ticket["issue"]), "--body",
+             f"### Factory: decision\n\n**{match['question']}**\n\n{text}\n\nRecorded in `{DOCS_DIR}/{program['id']}/{match['file']}`."],
+            cwd=REPO, capture_output=True, text=True,
+        )
+    save(program)
+    publish_docs(program)
+
+
+# ---- Change requests -------------------------------------------------------
+
+
+def change(program, text):
+    text = text.strip()
+    if not text:
+        die("a change request needs text")
+    if program["stage"] not in CHANGE_STAGES:
+        die(f"{program['id']} is {program['stage']}; wait for the current step to finish")
+    if running_pid(program["id"]):
+        die(f"{program['id']} is running; wait for it to finish")
+    stages = job_issue_stages()
+    building = sorted(t["issue"] for t in program["tickets"] if t.get("issue") in live_issues(stages))
+    if building:
+        die("tickets " + ", ".join(f"#{i}" for i in building) + " are being built; wait until they park or merge")
+    n = len(program["changes"]) + 1
+    title = text.splitlines()[0].lstrip("# ").strip()[:120] or f"Change {n}"
+    rel = f"changes/{n:03d}-{slug(title)}.md"
+    path = PROGRAMS / program["id"] / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        f"---\nstatus: open\nrequested_by: {operator()}\nrequested_on: {today()}\n---\n\n"
+        f"# Change {n}: {title}\n\n{text}\n"
+    )
+    program["changes"].append({"n": n, "title": title, "file": rel, "status": "open", "requested_on": today()})
+    program["stage"] = "research"
+    program["error"] = None
+    log_event(program, f"change {n} requested", title)
+    save(program)
+    publish_docs(program)
+
+
+def set_change_status(program, from_status, to_status):
+    for item in program["changes"]:
+        if item["status"] != from_status:
+            continue
+        item["status"] = to_status
+        path = PROGRAMS / program["id"] / item["file"]
+        if path.exists():
+            path.write_text(re.sub(r"(?m)^status: .*$", f"status: {to_status}", path.read_text(), count=1))
+
+
+# ---- Create and run roles --------------------------------------------------
+
+
+def create(title, prd):
+    prd = prd.strip()
+    if not title.strip() or not prd:
+        die("a program needs a title and a PRD")
+    PROGRAMS.mkdir(parents=True, exist_ok=True)
+    existing = [path.name for path in PROGRAMS.iterdir() if (path / "program.json").exists()]
+    number = len(existing) + 1
+    program_id = f"{number:03d}-{slug(title)}"
+    while (PROGRAMS / program_id).exists():
+        number += 1
+        program_id = f"{number:03d}-{slug(title)}"
+    folder = PROGRAMS / program_id
+    folder.mkdir(parents=True)
+    (folder / "prd.md").write_text(prd + "\n")
+    program = {
+        "id": program_id,
+        "title": title.strip(),
+        "stage": "research",
+        "error": None,
+        "created": now(),
+        "tickets": [],
+        "changes": [],
+        "decisions": [],
+        "log": [],
+        "release": None,
+    }
+    log_event(program, "program created", title)
+    save(program)
+    print(program_id)
+    return program
+
+
+def running_pid(program_id):
+    path = PROGRAMS / program_id / "running"
+    if not path.exists():
+        return None
+    try:
+        pid = int(path.read_text().strip())
+    except ValueError:
+        return None
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        path.unlink(missing_ok=True)
+        return None
+    return pid
+
+
+def mark_running(program_id):
+    (PROGRAMS / program_id / "running").write_text(str(os.getpid()) + "\n")
+
+
+def clear_running(program_id):
+    (PROGRAMS / program_id / "running").unlink(missing_ok=True)
+
+
+def spawn_role(program, role, prompt):
+    omp = CONFIG.get("omp", {}).get("bin", "omp")
+    if not shutil.which(omp) and not Path(omp).exists():
+        die(f"{omp} is not on PATH")
+    agent_file = FACTORY / "agents" / f"{role}.md"
+    if not agent_file.exists():
+        die(f"missing {agent_file}")
+    folder = PROGRAMS / program["id"]
+    session_dir = folder / "sessions" / role
+    session_dir.mkdir(parents=True, exist_ok=True)
+    log_path = folder / "logs" / f"{role}.log"
+    model_alias = (CONFIG.get("roles") or {}).get(role) or "slow"
+    model = (CONFIG.get("models") or {}).get(model_alias) or model_alias
+    tools = {
+        "researcher": "read,grep,glob,bash,write",
+        "contractor": "read,grep,glob,bash,write",
+        "release-check": "read,grep,glob,bash,write",
+    }.get(role, "read,grep,glob,write")
+    overlay = REPO / CONFIG.get("omp", {}).get("config", "factory/omp.yml")
+    cmd = [
+        omp, "-p",
+        "--model", model,
+        "--auto-approve",
+        "--approval-mode", "yolo",
+        "--thinking", "off",
+        "--cwd", str(REPO),
+        "--add-dir", str(folder),
+        "--session-dir", str(session_dir),
+        "--append-system-prompt", f"@{agent_file}",
+        "--tools", tools,
+        "--no-skills",
+        "--no-extensions",
+        "--max-time", str(CONFIG.get("agent_timeout") or "45m"),
+        prompt,
+    ]
+    if overlay.exists():
+        cmd += ["--config", str(overlay)]
+    env = os.environ.copy()
+    env.setdefault("PI_NO_PTY", "1")
+    trace(program["id"], f"{role}: starting ({model})")
+    code = factorylog.run(cmd, log_path, cwd=REPO, env=env, session_dir=session_dir)
+    if code != 0:
+        trace(program["id"], f"{role}: omp exited {code}. See {log_path}")
+        die(f"omp exited {code} for {role}. See {log_path}")
+    trace(program["id"], f"{role}: omp exited 0")
+
+
+def research(program):
+    folder = PROGRAMS / program["id"]
+    notes = sorted(folder.glob("revision-*.md"))
+    extra = ""
+    if notes:
+        extra += f" Apply the latest revision note {notes[-1].name}."
+    open_changes = [item for item in program["changes"] if item["status"] == "open"]
+    if open_changes:
+        files = ", ".join(item["file"] for item in open_changes)
+        extra += (
+            f" Open change requests: {files}. Fold each one into research.md and prd.enriched.md, "
+            f"and list what each changed under a '## Changes' heading in prd.enriched.md."
+        )
+    spawn_role(
+        program,
+        "researcher",
+        f"Program: {program['id']}. Folder: {folder}/. "
+        f"Read prd.md. Investigate the repository. Write research.md and prd.enriched.md.{extra}",
+    )
+    if not (folder / "research.md").exists() or not (folder / "prd.enriched.md").exists():
+        program["error"] = "Research finished without research.md and prd.enriched.md."
+        program["stage"] = "research"
+    else:
+        program["error"] = None
+        program["stage"] = "review-prd"
+    trace(program["id"], f"research done: stage {program['stage']}" + (f", {program['error']}" if program["error"] else ""))
+    save(program)
+    publish_docs(program)
+
+
+def write_contract(program):
+    """Turn the enriched PRD's acceptance scenarios into protected tests, before tickets are planned."""
+    if not CONFIG.get("write_contract"):
+        return True
+    folder = PROGRAMS / program["id"]
+    prd = folder / "prd.enriched.md"
+    dest = REPO / "test" / "hidden" / "contract.test.js"
+    if not prd.exists() or "## Acceptance" not in prd.read_text():
+        return True
+    if dest.exists() and dest.stat().st_mtime >= prd.stat().st_mtime:
+        return True
+    spawn_role(
+        program,
+        "contractor",
+        f"Program: {program['id']}. Folder: {folder}/. "
+        f"Read prd.enriched.md ## Acceptance. Write {dest} with one test per scenario. "
+        f"Load the product from the repository, not from a copied implementation. Do not edit product code.",
+    )
+    if not dest.exists():
+        program["error"] = "The contractor did not write test/hidden/contract.test.js."
+        program["stage"] = "plan"
+        save(program)
+        return False
+    if os.environ.get("FACTORY_PUBLISH_DOCS") == "0":
+        return True
+    branch = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=REPO, capture_output=True, text=True)
+    if branch.stdout.strip() != CONFIG.get("base_branch", "main"):
+        trace(program["id"], "contract written; this checkout is not the base branch, so it was not committed")
+        return True
+    subprocess.run(["git", "add", "--", "test/hidden/contract.test.js"], cwd=REPO, check=False)
+    staged = subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=REPO)
+    if staged.returncode != 0:
+        commit = subprocess.run(
+            ["git", "commit", "-m", f"Add the factory acceptance contract for {program['id']}."],
+            cwd=REPO, capture_output=True, text=True,
+        )
+        if commit.returncode != 0:
+            trace(program["id"], "contract commit failed: " + (commit.stderr or commit.stdout or "").strip())
+            return True
+        pushed = subprocess.run(["git", "push", "origin", "HEAD"], cwd=REPO, capture_output=True, text=True)
+        if pushed.returncode != 0:
+            trace(program["id"], "contract committed locally; push failed: " + (pushed.stderr or pushed.stdout or "").strip())
+    return True
+
+
+def schedule_shape(tickets):
+    """Waves that can run together. Depends blocks. A shared area serializes. After does not."""
+    pending = [ticket for ticket in tickets if ticket["status"] != "superseded"]
+    done = set()
+    waves = []
+    for _ in range(len(pending) + 1):
+        if not pending:
+            break
+        claimed = set()
+        wave = []
+        for ticket in pending:
+            if any(dep not in done for dep in ticket["depends"]):
+                continue
+            areas = set(ticket["touches"])
+            if claimed & areas:
+                continue
+            claimed |= areas
+            wave.append(ticket["n"])
+        if not wave:
+            break
+        waves.append(wave)
+        done.update(wave)
+        pending = [ticket for ticket in pending if ticket["n"] not in done]
+    return waves
+
+
+def serial_warning(tickets):
+    """A sentence when most waves hold one ticket, or None when the plan fans out."""
+    live = [ticket for ticket in tickets if ticket["status"] != "superseded"]
+    if len(live) < 4:
+        return None
+    waves = schedule_shape(live)
+    if len(waves) < 2:
+        return None
+    narrow = sum(1 for wave in waves if len(wave) == 1)
+    if narrow * 2 <= len(waves):
+        return None
+    widths = " ".join(str(len(wave)) for wave in waves)
+    return (
+        f"{narrow} of {len(waves)} waves hold one ticket (widths {widths}). "
+        f"Land a contract for any surface three tickets share, and give different "
+        f"files different Touches areas. Use After only between tickets that do not share an area."
+    )
+
+
+def plan(program, critique=""):
+    folder = PROGRAMS / program["id"]
+    sync_jobs()
+    stages = job_issue_stages()
+    done = finished_issues(stages)
+    extra = ""
+    filed = [ticket for ticket in program["tickets"] if ticket.get("issue")]
+    if not filed and not write_contract(program):
+        return
+    if filed:
+        merged = [str(ticket["n"]) for ticket in filed if ticket["issue"] in done]
+        listing = ", ".join(f"{ticket['n']} (#{ticket['issue']})" for ticket in filed)
+        extra = (
+            f" tickets.md already exists and these tickets are filed on GitHub: {listing}."
+            f" Keep their numbers and titles. Merged tickets must stay unchanged: {', '.join(merged) or 'none'}."
+            f" To drop a filed ticket, keep its section and add `Status: superseded`."
+            f" Add new work as new tickets with the next numbers. Rewrite the whole file."
+        )
+    spawn_role(
+        program,
+        "planner",
+        f"Program: {program['id']}. Folder: {folder}/. "
+        f"Read prd.enriched.md and research.md. Write tickets.md.{extra}"
+        + (f" The previous list was sent back: {critique}" if critique else ""),
+    )
+    path = folder / "tickets.md"
+    if not path.exists():
+        program["error"] = "Planning finished without tickets.md."
+        program["stage"] = "plan"
+        trace(program["id"], f"plan failed: {program['error']}")
+        save(program)
+        return
+    try:
+        tickets = merge_tickets(program["tickets"], parse_tickets(path.read_text()), done)
+    except ValueError as exc:
+        program["error"] = str(exc)
+        program["stage"] = "plan"
+        trace(program["id"], f"plan failed: {exc}")
+        save(program)
+        return
+    program["tickets"] = tickets
+    trace(program["id"], f"plan wrote {len(tickets)} tickets")
+    warning = None if filed else serial_warning(tickets)
+    if warning and int(program.get("shape_retries") or 0) < 1:
+        program["shape_retries"] = 1
+        program["schedule_warning"] = warning
+        trace(program["id"], f"plan sent back: {warning}")
+        save(program)
+        return plan(program, critique=warning)
+    program["schedule_warning"] = warning
+    sync_decisions(program)
+    set_change_status(program, "open", "planned")
+    program["error"] = None
+    program["stage"] = "review-tickets"
+    save(program)
+    publish_docs(program)
+
+
+def merge_tickets(old, new, done_issues):
+    """Carry issues over by number and mark what the replan changed.
+
+    A filed ticket may not vanish: it is kept, or marked superseded. A merged
+    ticket may not change.
+    """
+    by_number = {ticket["n"]: ticket for ticket in new}
+    for ticket in old:
+        if not ticket.get("issue"):
+            continue
+        replacement = by_number.get(ticket["n"])
+        if replacement is None:
+            raise ValueError(f"ticket {ticket['n']} (#{ticket['issue']}) is missing; keep it and mark it Status: superseded")
+        replacement["issue"] = ticket["issue"]
+        replacement["url"] = ticket.get("url")
+        same = all(
+            replacement[key] == ticket.get(key, default)
+            for key, default in (("title", ""), ("body", ""), ("depends", []), ("after", []),
+                                 ("touches", []), ("kind", "feature"), ("decision", None),
+                                 ("risk", None), ("surfaces", []))
+        )
+        if ticket["issue"] in done_issues:
+            if replacement["status"] == "superseded" or not same:
+                raise ValueError(f"ticket {ticket['n']} (#{ticket['issue']}) is merged and cannot change")
+            replacement["change"] = "merged"
+        elif replacement["status"] == "superseded":
+            replacement["change"] = "superseded"
+        elif same:
+            replacement["change"] = "same"
+        else:
+            replacement["change"] = "changed"
+    for ticket in new:
+        ticket.setdefault("change", "added" if old else "new")
+    return new
+
+
+def gh(*args):
+    result = subprocess.run(["gh", *args], cwd=REPO, capture_output=True, text=True)
+    if result.returncode != 0:
+        die((result.stderr or result.stdout).strip() or f"gh {' '.join(args)} failed")
+    return result.stdout.strip()
+
+
+def approve_prd(program):
+    if program["stage"] != "review-prd":
+        die(f"{program['id']} is {program['stage']}, not review-prd")
+    folder = PROGRAMS / program["id"]
+    if not (folder / "prd.enriched.md").exists():
+        die("there is no enriched PRD to approve")
+    program["stage"] = "plan"
+    program["error"] = None
+    log_event(program, "PRD approved")
+    save(program)
+    publish_docs(program)
+
+
+def revise_prd(program, notes):
+    notes = notes.strip()
+    if not notes:
+        die("a revision needs a note")
+    folder = PROGRAMS / program["id"]
+    count = len(list(folder.glob("revision-*.md"))) + 1
+    (folder / f"revision-{count}.md").write_text(notes + "\n")
+    program["stage"] = "research"
+    program["error"] = None
+    log_event(program, "PRD sent back", notes)
+    save(program)
+    publish_docs(program)
+
+
+def ticket_body(program, ticket):
+    depends = ", ".join(str(item) for item in ticket["depends"]) or "none"
+    lines = [
+        f"Program: {program['id']}",
+        f"Ticket: {ticket['n']}",
+        f"Kind: {ticket['kind']}",
+        f"Depends: {depends}",
+    ]
+    if ticket["after"]:
+        lines.append("After: " + ", ".join(str(item) for item in ticket["after"]))
+    if ticket["touches"]:
+        lines.append("Touches: " + ", ".join(ticket["touches"]))
+    if ticket.get("risk"):
+        lines.append(f"Risk: {ticket['risk']}")
+    if ticket.get("surfaces"):
+        lines.append("Surfaces: " + ", ".join(ticket["surfaces"]))
+    if ticket["kind"] == "spike":
+        lines.append(
+            f"\nThis is a spike. The deliverable is `{DOCS_DIR}/{program['id']}/spikes/"
+            f"{ticket['n']:03d}-{slug(ticket['title'])}.md` with what was learned and a recommendation. "
+            f"No product code."
+        )
+    decision = next((item for item in program["decisions"] if item["ticket"] == ticket["n"]), None)
+    if decision and decision["status"] == "accepted":
+        lines.append(f"\nDecision: {decision['question']}\n{decision['decision']}")
+    return "\n".join(lines) + f"\n\n{ticket['body']}\n"
+
+
+def file_tickets(program):
+    """Create the label if needed, then one GitHub issue per new ticket. Idempotent.
+
+    A changed filed ticket gets the new text as a comment. A superseded filed
+    ticket is closed with a comment and loses the factory labels.
+    """
+    if program["stage"] != "review-tickets":
+        die(f"{program['id']} is {program['stage']}, not review-tickets")
+    subprocess.run(
+        ["gh", "label", "create", BACKLOG, "--color", "0E8A16", "--description", "Factory program ticket, not started"],
+        cwd=REPO, capture_output=True, text=True,
+    )
+    queue = CONFIG["labels"]["queue"]
+    sync_jobs()
+    stages = job_issue_stages()
+    done = finished_issues(stages)
+    jobs = job_records()
+    for ticket in program["tickets"]:
+        change_kind = ticket.pop("change", None)
+        if ticket.get("issue"):
+            if ticket["issue"] in done:
+                continue
+            if change_kind == "superseded":
+                job = jobs.get(ticket["issue"])
+                if job and stages.get(ticket["issue"]) in {"needs-human", "needs-info"}:
+                    subprocess.run([sys.executable, str(FACTORY / "bin" / "job"), "reject", job["id"]],
+                                   cwd=REPO, capture_output=True, text=True,
+                                   input="A change request superseded this ticket.")
+                gh("issue", "comment", str(ticket["issue"]), "--body",
+                   "### Factory: superseded\n\nA change request replaced this ticket. See the program's ticket list.")
+                subprocess.run(["gh", "issue", "edit", str(ticket["issue"]), "--remove-label", f"{BACKLOG},{queue}"],
+                               cwd=REPO, capture_output=True, text=True)
+                gh("issue", "close", str(ticket["issue"]), "--reason", "not planned")
+            elif change_kind == "changed":
+                gh("issue", "comment", str(ticket["issue"]), "--body",
+                   "### Factory: ticket updated\n\n" + ticket_body(program, ticket))
+            save(program)
+            continue
+        if ticket["status"] == "superseded":
+            continue
+        url = gh("issue", "create", "--title", ticket["title"], "--body", ticket_body(program, ticket), "--label", BACKLOG)
+        number = gh("issue", "view", url, "--json", "number", "-q", ".number")
+        ticket["issue"] = int(number)
+        ticket["url"] = url
+        trace(program["id"], f"filed ticket {ticket['n']} as #{ticket['issue']}")
+        save(program)  # a retry after a gh failure must not file this ticket twice
+    link_issues(program)
+    set_change_status(program, "planned", "filed")
+    program["stage"] = "implementing"
+    program["error"] = None
+    log_event(program, "tickets approved", f"{len([t for t in program['tickets'] if t.get('issue')])} on GitHub")
+    save(program)
+    publish_docs(program)
+
+
+def gh_soft(*args):
+    result = subprocess.run(["gh", *args], cwd=REPO, capture_output=True, text=True)
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip()
+
+
+def link_issues(program):
+    """Parent issue plus sub-issues and blocked-by links. GitHub is a view; a failure does not stop filing."""
+    filed = [ticket for ticket in program["tickets"] if ticket.get("issue") and ticket["status"] != "superseded"]
+    if len(filed) < 2 or not shutil.which("gh"):
+        return
+    repo = gh_soft("repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner")
+    if not repo:
+        return
+    gh_soft("label", "create", "factory:program", "--color", "1D76DB", "--description", "Factory program. Not a build ticket.")
+    if not program.get("parent_issue"):
+        body = "Factory program. This issue is not built; it groups the tickets.\n\n" + "\n".join(
+            f"- #{ticket['issue']} {ticket['title']}" for ticket in filed
+        )
+        url = gh_soft("issue", "create", "--title", f"Program: {program['title']}", "--body", body, "--label", "factory:program")
+        number = gh_soft("issue", "view", url, "--json", "number", "-q", ".number") if url else None
+        if not number or not number.isdigit():
+            trace(program["id"], "parent issue was not created")
+            return
+        program["parent_issue"] = int(number)
+        save(program)
+        trace(program["id"], f"parent issue #{program['parent_issue']}")
+    parent = program["parent_issue"]
+
+    def issue_id(number):
+        raw = gh_soft("api", f"repos/{repo}/issues/{number}", "--jq", ".id")
+        return raw if raw and raw.isdigit() else None
+
+    for ticket in filed:
+        child = issue_id(ticket["issue"])
+        if child:
+            _post_json(repo, f"issues/{parent}/sub_issues", {"sub_issue_id": int(child)})
+        for dep in ticket["depends"]:
+            blocker = next((item for item in filed if item["n"] == dep and item.get("issue")), None)
+            blocker_id = issue_id(blocker["issue"]) if blocker else None
+            if blocker_id:
+                _post_json(repo, f"issues/{ticket['issue']}/dependencies/blocked_by", {"issue_id": int(blocker_id)})
+
+
+def _post_json(repo, path, payload):
+    result = subprocess.run(
+        ["gh", "api", "--method", "POST", "-H", "Accept: application/vnd.github+json",
+         f"repos/{repo}/{path}", "--input", "-"],
+        cwd=REPO, input=json.dumps(payload), text=True, capture_output=True,
+    )
+    if result.returncode != 0:
+        trace_path = (result.stderr or result.stdout or "").strip().splitlines()
+        # Already linked is a normal retry. Anything else is recorded and ignored.
+        message = trace_path[-1] if trace_path else "no response"
+        if "already" not in message.lower() and "exists" not in message.lower():
+            print(f"program: link {path} failed: {message}", file=sys.stderr)
+
+
+def label_queue(issue):
+    gh("issue", "edit", str(issue), "--add-label", CONFIG["labels"]["queue"])
+
+
+def refill():
+    """Label every ticket that can start now. Does not drain; `run` is already draining."""
+    if not PROGRAMS.exists():
+        return
+    for path in sorted(PROGRAMS.glob("*/program.json")):
+        program = load(path.parent.name)
+        if program.get("stage") != "implementing":
+            continue
+        sync_jobs()
+        stages = job_issue_stages()
+        ready = ready_tickets(
+            program["tickets"], finished_issues(stages), active_issues(stages),
+            open_decisions(program), rejected_issues(stages),
+        )
+        labeled = []
+        for ticket in ready:
+            if gh_soft("issue", "edit", str(ticket["issue"]), "--add-label", CONFIG["labels"]["queue"]) is None:
+                print(f"refill failed to label #{ticket['issue']}", file=sys.stderr)
+                continue
+            labeled.append(ticket)
+        if labeled:
+            print("refill " + " ".join(f"{ticket['n']} (#{ticket['issue']})" for ticket in labeled), flush=True)
+
+
+def run_factory(issues=()):
+    """Drain the factory queue. Returns when every job has parked or finished.
+
+    `issues` are ones just labeled. The run waits for GitHub's label search to
+    list them before it decides the queue is empty.
+    """
+    env = os.environ.copy()
+    if issues:
+        env["FACTORY_EXPECT"] = ",".join(str(number) for number in issues)
+    result = subprocess.run([sys.executable, str(FACTORY / "bin" / "run")], cwd=REPO, env=env)
+    return result.returncode
+
+
+def merge_approved(attempted):
+    """Finish parked approvals when auto_merge is on.
+
+    A job reaches needs-human with APPROVE only when auto_merge was off.
+    Turning it on should merge those, after the same sync and gate as a
+    fresh approval. An ESCALATE stays parked, except one GitHub rejected
+    because the base branch moved: that merge is tried once per step.
+    Each job is tried once per step, so a merge that fails does not spin.
+    """
+    if not CONFIG.get("auto_merge", True):
+        return False
+    acted = False
+    for job in sorted(job_records().values(), key=lambda item: item.get("issue") or 0):
+        if job.get("stage") != "needs-human" or not job.get("id") or job["id"] in attempted:
+            continue
+        decision = FACTORY / "jobs" / job["id"] / "decision.md"
+        if not decision.exists():
+            continue
+        text = decision.read_text()
+        first = text.split("\n", 1)[0].strip()
+        # An ESCALATE stays parked, except a merge GitHub rejected because the
+        # base moved. That one is retried here, once per step.
+        note = f"outside claimed areas: factory/memory/{job['id']}.md"
+        note_only = note in text and not text.split(note, 1)[1].startswith(",")
+        if first != "APPROVE" and not (first == "ESCALATE" and ("Base branch was modified" in text or note_only)):
+            continue
+        attempted.add(job["id"])
+        acted = True
+        subprocess.run([sys.executable, str(FACTORY / "bin" / "job"), "merge", job["id"]], cwd=REPO)
+    return acted
+
+
+def implement(program):
+    """Start every ready ticket, run the factory, and repeat while merges unlock more."""
+    if program["stage"] != "implementing":
+        die(f"{program['id']} is {program['stage']}, not implementing")
+    started_before = None
+    attempted_merges = set()
+    while True:
+        program = load(program["id"])
+        sync_jobs()
+        if merge_approved(attempted_merges):
+            continue
+        stages = job_issue_stages()
+        done = finished_issues(stages)
+        rejected = rejected_issues(stages)
+        active = active_issues(stages)
+        blocked = open_decisions(program)
+        ready = ready_tickets(program["tickets"], done, active, blocked, rejected)
+        open_tickets = [t for t in program["tickets"] if not settled(t, done)]
+        if not open_tickets:
+            release(program)
+            return
+        if not ready:
+            waiting = [t for t in open_tickets if t.get("issue") not in active]
+            reasons = sorted({waiting_reason(t, program["tickets"], done, active, blocked, rejected) for t in waiting})
+            parked = [f"#{issue}" for issue in active if stages.get(issue) in {"needs-human", "needs-info"}]
+            note = []
+            if parked:
+                note.append("your call on " + ", ".join(parked))
+            if reasons:
+                note.append("; ".join(reasons))
+            program["error"] = None
+            program["waiting"] = ". ".join(note) or "jobs are running"
+            trace(program["id"], f"implement waiting: {program['waiting']}")
+            save(program)
+            return
+        issues = tuple(t["issue"] for t in ready)
+        trace(program["id"], "ready " + ", ".join(f"{t['n']} (#{t['issue']})" for t in ready))
+        if issues == started_before:
+            program["error"] = f"the factory did not pick up {', '.join('#' + str(i) for i in issues)}; see factory/bin/run status"
+            save(program)
+            return
+        started_before = issues
+        for ticket in ready:
+            label_queue(ticket["issue"])
+        program["waiting"] = "building " + ", ".join(f"#{issue}" for issue in issues)
+        program["error"] = None
+        log_event(program, "tickets started", ", ".join(f"{t['n']} (#{t['issue']})" for t in ready))
+        save(program)
+        if run_factory(issues) != 0:
+            program = load(program["id"])
+            program["error"] = "factory/bin/run failed; see its output"
+            save(program)
+            return
+
+
+def verify_release(program):
+    """Run the repo checks, then a browser walk of the PRD, before the note is drafted.
+
+    The check runs in a detached worktree of the base branch. The main checkout
+    can be behind the merges the factory just pushed.
+    """
+    if not CONFIG.get("verify_release"):
+        return True
+    folder = PROGRAMS / program["id"]
+    base = CONFIG.get("base_branch", "main")
+    checkout = REPO / ".worktrees" / f"release-{program['id']}"
+    parts = []
+    ok = True
+    subprocess.run(["git", "fetch", "origin", base], cwd=REPO, capture_output=True, text=True)
+    if checkout.exists():
+        subprocess.run(["git", "worktree", "remove", "--force", str(checkout)], cwd=REPO, capture_output=True, text=True)
+    added = subprocess.run(
+        ["git", "worktree", "add", "--detach", str(checkout), f"origin/{base}"],
+        cwd=REPO, capture_output=True, text=True,
+    )
+    if added.returncode != 0:
+        program["error"] = "release verification could not check out the base branch: " + (added.stderr or added.stdout or "").strip()
+        program["waiting"] = None
+        save(program)
+        return False
+    try:
+        for name in ("checks.sh", "accept.sh"):
+            script = FACTORY / name
+            if not script.exists():
+                continue
+            res = subprocess.run(["bash", str(script)], cwd=checkout, capture_output=True, text=True)
+            output = ((res.stdout or "") + (res.stderr or ""))[-2000:]
+            parts.append(f"## {name}\nexit {res.returncode}\n\n```\n{output}\n```\n")
+            if res.returncode != 0:
+                ok = False
+        report = folder / "release-check.md"
+        if ok and (FACTORY / "agents" / "release-check.md").exists():
+            try:
+                spawn_role(
+                    program,
+                    "release-check",
+                    f"Program: {program['id']}. Folder: {folder}/. "
+                    f"The base branch is checked out at {checkout}. Start the server from that directory, "
+                    f"not from the main checkout. Walk the acceptance scenarios in prd.enriched.md and write release-check.md.",
+                )
+            except SystemExit as exc:
+                ok = False
+                parts.append(f"## release-check\n{exc}\n")
+            if ok and (not report.exists() or not report.read_text().lstrip().startswith("PASS")):
+                ok = False
+                parts.append("## release-check\nrelease-check.md must start with PASS.\n")
+    finally:
+        subprocess.run(["git", "worktree", "remove", "--force", str(checkout)], cwd=REPO, capture_output=True, text=True)
+    (folder / "release-verify.md").write_text("\n".join(parts) + "\n")
+    if not ok:
+        program["error"] = "release verification failed; see release-verify.md"
+        program["waiting"] = None
+        save(program)
+        trace(program["id"], program["error"])
+        return False
+    program["error"] = None
+    return True
+
+
+def release(program):
+    """Every ticket has merged: prove the base branch, then draft the release note."""
+    if not verify_release(program):
+        return
+    jobs = job_records()
+    rows, skipped = [], []
+    for ticket in sorted(program["tickets"], key=lambda item: item["n"]):
+        if ticket["status"] == "superseded":
+            skipped.append(f"- {ticket['n']}. {ticket['title']}: superseded by a change request")
+            continue
+        job = jobs.get(ticket.get("issue") or 0, {})
+        if job.get("stage") == "rejected":
+            skipped.append(f"- {ticket['n']}. {ticket['title']} (#{ticket['issue']}): rejected")
+            continue
+        pr = f"#{job['pr']}" if job.get("pr") else "-"
+        rows.append(f"| {ticket['n']} | {ticket['title']} | #{ticket.get('issue') or '-'} | {pr} |")
+    decisions = [f"- {item['question']}: {item['decision']}" for item in program["decisions"] if item["status"] == "accepted"]
+    changes = [f"- {item['title']}" for item in program["changes"]]
+    text = (
+        f"---\nstatus: draft\ndrafted_on: {today()}\nreleased_by:\nreleased_on:\n---\n\n"
+        f"# Release: {program['title']}\n\n"
+        f"## What shipped\n\n| Ticket | Title | Issue | PR |\n|---|---|---|---|\n" + "\n".join(rows) + "\n\n"
+        f"## Not shipped\n\n" + ("\n".join(skipped) or "- none") + "\n\n"
+        f"## Decisions\n\n" + ("\n".join(decisions) or "- none") + "\n\n"
+        f"## Change requests\n\n" + ("\n".join(changes) or "- none") + "\n\n"
+        f"## Run it\n\nSetup, run and check commands are in `AGENTS.md`. "
+        f"Tagging and deploying are human steps; the factory does not deploy.\n"
+    )
+    (PROGRAMS / program["id"] / "release.md").write_text(text)
+    program["release"] = {"status": "draft", "drafted_on": today()}
+    program["stage"] = "release"
+    program["waiting"] = None
+    program["error"] = None
+    log_event(program, "release drafted")
+    save(program)
+    publish_docs(program)
+
+
+def accept_release(program):
+    if program["stage"] != "release":
+        die(f"{program['id']} is {program['stage']}, not release")
+    path = PROGRAMS / program["id"] / "release.md"
+    if path.exists():
+        body = path.read_text()
+        body = re.sub(r"(?m)^status: .*$", "status: released", body, count=1)
+        body = re.sub(r"(?m)^released_by:.*$", f"released_by: {operator()}", body, count=1)
+        body = re.sub(r"(?m)^released_on:.*$", f"released_on: {today()}", body, count=1)
+        path.write_text(body)
+    program["release"] = {"status": "released", "released_by": operator(), "released_on": today()}
+    program["stage"] = "done"
+    log_event(program, "release accepted")
+    save(program)
+    publish_docs(program)
+
+
+# ---- Documents in the repository ------------------------------------------
+
+
+def publish_docs(program):
+    """Copy the program's documents into the repo and record the consent log.
+
+    factory/programs/ is runtime state and gitignored. docs/programs/<id>/ is
+    the record: PRD, research, enriched PRD, tickets, change requests,
+    decisions, the release note, and README.md with who accepted what.
+    """
+    src = PROGRAMS / program["id"]
+    dest = REPO / DOCS_DIR / program["id"]
+    dest.mkdir(parents=True, exist_ok=True)
+    for path in src.rglob("*.md"):
+        rel = path.relative_to(src)
+        if rel.parts[0] in {"sessions", "logs"}:
+            continue
+        target = dest / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(path, target)
+    (dest / "README.md").write_text(render_index(program))
+    if os.environ.get("FACTORY_PUBLISH_DOCS") == "0" or not (REPO / ".git").exists():
+        return
+    subprocess.run(["git", "add", "--", str(dest)], cwd=REPO, capture_output=True, text=True)
+    staged = subprocess.run(["git", "diff", "--cached", "--quiet", "--", str(dest)], cwd=REPO)
+    if staged.returncode == 0:
+        return
+    commit = subprocess.run(["git", "commit", "-m", f"Record program docs for {program['id']}.", "--", str(dest)],
+                            cwd=REPO, capture_output=True, text=True)
+    if commit.returncode != 0:
+        print(f"{program['id']}: docs copied, commit failed: {(commit.stderr or commit.stdout).strip()}", file=sys.stderr)
+        return
+    push = subprocess.run(["git", "push", "origin", "HEAD"], cwd=REPO, capture_output=True, text=True)
+    if push.returncode != 0:
+        print(f"{program['id']}: docs committed, push failed: {(push.stderr or push.stdout).strip()}", file=sys.stderr)
+
+
+def render_index(program):
+    folder = PROGRAMS / program["id"]
+    approved = {event["event"]: event for event in program["log"]}
+
+    def consent(event):
+        item = approved.get(event)
+        return f"accepted by {item['by']} on {item['at'][:10]}" if item else "not yet"
+
+    lines = [
+        f"# {program['title']}",
+        "",
+        f"Program `{program['id']}`. Stage: {STAGE_LABEL.get(program['stage'], program['stage'])}.",
+        "",
+        "## Documents",
+        "",
+        "| Document | File | Status |",
+        "|---|---|---|",
+        f"| PRD | [prd.md](prd.md) | {consent('PRD approved')} |",
+    ]
+    if (folder / "research.md").exists():
+        lines.append("| Research | [research.md](research.md) | written |")
+    if (folder / "prd.enriched.md").exists():
+        lines.append(f"| Enriched PRD | [prd.enriched.md](prd.enriched.md) | {consent('PRD approved')} |")
+    if (folder / "tickets.md").exists():
+        lines.append(f"| Tickets | [tickets.md](tickets.md) | {consent('tickets approved')} |")
+    for item in program["changes"]:
+        lines.append(f"| Change {item['n']}: {item['title']} | [{item['file']}]({item['file']}) | {item['status']} |")
+    for item in program["decisions"]:
+        status = item["status"]
+        if item.get("decided_by"):
+            status += f" by {item['decided_by']} on {item['decided_on']}"
+        lines.append(f"| Decision {item['n']}: {item['question']} | [{item['file']}]({item['file']}) | {status} |")
+    if (folder / "release.md").exists():
+        lines.append(f"| Release | [release.md](release.md) | {consent('release accepted')} |")
+    lines += ["", "## Tickets", ""]
+    for ticket in sorted(program["tickets"], key=lambda item: item["n"]):
+        issue = f"#{ticket['issue']}" if ticket.get("issue") else "not filed"
+        flags = [ticket["kind"]] if ticket["kind"] != "feature" else []
+        if ticket["status"] == "superseded":
+            flags.append("superseded")
+        suffix = f" ({', '.join(flags)})" if flags else ""
+        lines.append(f"- {ticket['n']}. {ticket['title']} — {issue}{suffix}")
+    lines += ["", "## Consent log", "", "| When | Who | Event | Note |", "|---|---|---|---|"]
+    for event in program["log"]:
+        note = event["note"].replace("|", "\\|").replace("\n", " ")
+        lines.append(f"| {event['at']} | {event['by']} | {event['event']} | {note} |")
+    return "\n".join(lines) + "\n"
+
+
+# ---- Commands --------------------------------------------------------------
+
+
+def step(program_id):
+    if running_pid(program_id):
+        print(f"{program_id}: already running")
+        return
+    program = load(program_id)
+    mark_running(program_id)
+    trace(program_id, f"step: stage {program['stage']}")
+    try:
+        if program["stage"] == "research":
+            research(program)
+        elif program["stage"] == "plan":
+            plan(program)
+        elif program["stage"] == "implementing":
+            implement(program)
+        elif program["stage"] == "release":
+            print(f"{program_id}: release note waits for acceptance")
+        elif program["stage"] == "done":
+            print(f"{program_id}: done")
+        else:
+            print(f"{program_id}: {STAGE_LABEL.get(program['stage'], program['stage'])}")
+    finally:
+        clear_running(program_id)
+
+
+def status():
+    programs = []
+    if PROGRAMS.exists():
+        for path in sorted(PROGRAMS.glob("*/program.json")):
+            program = load(path.parent.name)
+            program["running"] = bool(running_pid(program["id"]))
+            programs.append(program)
+    print(json.dumps(programs, indent=2))
+
+
+def main(argv):
+    if not argv or argv[0] in {"-h", "--help"}:
+        print(__doc__.strip())
+        return
+    command, args = argv[0], argv[1:]
+    if command == "new" and len(args) == 1:
+        create(args[0], sys.stdin.read())
+    elif command == "step" and len(args) == 1:
+        step(args[0])
+    elif command == "approve-prd" and len(args) == 1:
+        approve_prd(load(args[0]))
+        print(args[0])
+    elif command == "revise-prd" and len(args) == 1:
+        revise_prd(load(args[0]), sys.stdin.read())
+        print(args[0])
+    elif command == "approve-tickets" and len(args) == 1:
+        file_tickets(load(args[0]))
+        print(args[0])
+    elif command == "change" and len(args) == 1:
+        change(load(args[0]), sys.stdin.read())
+        print(args[0])
+    elif command == "decide" and len(args) == 2 and args[1].isdigit():
+        decide(load(args[0]), int(args[1]), sys.stdin.read())
+        print(args[0])
+    elif command == "accept-release" and len(args) == 1:
+        accept_release(load(args[0]))
+        print(args[0])
+    elif command == "refill" and not args:
+        refill()
+    elif command == "status" and not args:
+        status()
+    else:
+        die(f"bad arguments: {' '.join(argv)}\n\n{__doc__.strip()}", code=2)
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

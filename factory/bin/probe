@@ -1,0 +1,121 @@
+#!/usr/bin/env python3
+"""Prove every model in factory/config.json can call the write tool.
+
+omp-setup's tool-call probe: the model must create hello.txt containing the
+word ready. A reply that only describes the write is a failure. Results are
+cached in factory/probe-results.json for 24 hours unless --force is passed.
+
+Usage:
+  probe          probe each distinct selector, using a fresh result when one is missing
+  probe --force  probe again
+"""
+
+import hashlib
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+REPO = Path(os.environ.get("FACTORY_REPO") or Path(__file__).resolve().parents[2])
+FACTORY = REPO / "factory"
+CONFIG = json.loads((FACTORY / "config.json").read_text())
+CACHE = FACTORY / "probe-results.json"
+PROMPT = (
+    "Use the write tool to create hello.txt. The contents must be exactly the "
+    "word ready. Then read hello.txt and stop."
+)
+FRESH_SECONDS = 24 * 60 * 60
+
+
+def selectors():
+    models = CONFIG.get("models") or {}
+    found = []
+    for role in ("smol", "default", "slow"):
+        if not models.get(role):
+            raise SystemExit(f"probe: config.json models.{role} is missing")
+    for value in models.values():
+        if value and value not in found:
+            found.append(value)
+    return found
+
+
+def load_cache():
+    if not CACHE.exists():
+        return {}
+    try:
+        return json.loads(CACHE.read_text())
+    except json.JSONDecodeError:
+        return {}
+
+
+def save_cache(cache):
+    CACHE.write_text(json.dumps(cache, indent=2) + "\n")
+
+
+def fresh(entry):
+    if not entry or not entry.get("ok"):
+        return False
+    return time.time() - entry.get("at", 0) < FRESH_SECONDS
+
+
+def probe_one(selector):
+    omp = (CONFIG.get("omp") or {}).get("bin", "omp")
+    if not shutil.which(omp) and not Path(omp).exists():
+        return False, f"{omp} is not on PATH"
+    with tempfile.TemporaryDirectory(prefix="factory-probe-") as tmp:
+        started = time.monotonic()
+        proc = subprocess.run(
+            [
+                omp, "-p",
+                "--model", selector,
+                "--auto-approve",
+                "--approval-mode", "yolo",
+                "--thinking", "off",
+                "--max-time", "8m",
+                "--no-skills",
+                "--no-extensions",
+                "--tools", "write,read",
+                "--config", str(FACTORY / "omp.yml"),
+                "--cwd", tmp,
+                PROMPT,
+            ],
+            cwd=tmp,
+            capture_output=True,
+            text=True,
+        )
+        seconds = int(time.monotonic() - started)
+        hello = Path(tmp) / "hello.txt"
+        body = hello.read_text().strip() if hello.exists() else ""
+        ok = proc.returncode == 0 and body == "ready"
+        tail = "\n".join((proc.stdout + "\n" + proc.stderr).strip().splitlines()[-20:])
+        detail = f"exit {proc.returncode}, hello.txt={body!r}, {seconds}s"
+        if not ok and tail:
+            detail += "\n" + tail
+        return ok, detail
+
+
+def main(argv):
+    force = "--force" in argv
+    cache = load_cache()
+    failed = False
+    for selector in selectors():
+        key = hashlib.sha256(selector.encode()).hexdigest()[:12]
+        if not force and fresh(cache.get(key)):
+            print(f"PASS  {selector}  (cached)")
+            continue
+        print(f"....  {selector}", flush=True)
+        ok, detail = probe_one(selector)
+        cache[key] = {"selector": selector, "ok": ok, "at": time.time(), "detail": detail.splitlines()[0]}
+        save_cache(cache)
+        print(("PASS  " if ok else "FAIL  ") + f"{selector}  {detail}")
+        failed = failed or not ok
+    if failed:
+        raise SystemExit(1)
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

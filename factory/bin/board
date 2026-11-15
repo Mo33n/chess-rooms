@@ -1,0 +1,306 @@
+#!/usr/bin/env python3
+"""The factory's admin board: PRDs, tickets, decisions, jobs, and releases.
+
+Serves factory/dashboard.html, the program and job files, and accepts every
+decision the page posts. Long factory work is started in the background and
+logged to factory/programs/board.log; the page polls for the result. Binds to
+127.0.0.1 only.
+
+Usage:
+  board              http://127.0.0.1:8000/
+  board <port>
+"""
+
+import json
+import os
+import subprocess
+import sys
+import time
+from datetime import datetime
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+FACTORY = Path(__file__).resolve().parents[1]
+REPO = FACTORY.parent
+PROGRAM = FACTORY / "bin" / "program"
+RUN = FACTORY / "bin" / "run"
+JOB = FACTORY / "bin" / "job"
+PROBE = FACTORY / "bin" / "probe"
+CONFIG = json.loads((FACTORY / "config.json").read_text())
+
+
+def read_json(path):
+    return json.loads(path.read_text())
+
+
+def running(program_id):
+    path = FACTORY / "programs" / program_id / "running"
+    if not path.exists():
+        return False
+    try:
+        os.kill(int(path.read_text().strip()), 0)
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def state():
+    programs = []
+    folder = FACTORY / "programs"
+    if folder.exists():
+        for path in sorted(folder.glob("*/program.json")):
+            program = read_json(path)
+            program["running"] = running(program["id"])
+            programs.append(program)
+    jobs = []
+    jobs_dir = FACTORY / "jobs"
+    if jobs_dir.exists():
+        for path in sorted(jobs_dir.glob("*/job.json")):
+            jobs.append(read_json(path))
+    return {
+        "programs": programs,
+        "jobs": jobs,
+        "config": {
+            "concurrency": CONFIG.get("concurrency"),
+            "auto_merge": CONFIG.get("auto_merge", False),
+            "docs_dir": CONFIG.get("docs_dir") or "docs/programs",
+            "base_branch": CONFIG.get("base_branch"),
+        },
+    }
+
+
+def readiness():
+    """What has to be true before a PRD can go in. Cheap checks only."""
+    checks = []
+
+    def add(name, ok, hint):
+        checks.append({"name": name, "ok": bool(ok), "hint": "" if ok else hint})
+
+    add("omp on PATH", subprocess.run(["which", CONFIG.get("omp", {}).get("bin", "omp")], capture_output=True).returncode == 0,
+        "Install omp: curl -fsSL https://omp.sh/install | sh")
+    gh_ok = subprocess.run(["gh", "auth", "status"], capture_output=True).returncode == 0
+    add("gh is signed in", gh_ok, "Run gh auth login")
+    add("AGENTS.md exists", (REPO / "AGENTS.md").exists(), "Write AGENTS.md: setup, run, and check commands")
+    checks_sh = REPO / "factory" / "checks.sh"
+    text = checks_sh.read_text() if checks_sh.exists() else ""
+    add("checks.sh has real checks", checks_sh.exists() and "has no checks yet" not in text,
+        "Replace factory/checks.sh with this repo's lint, test, and build")
+    probe = FACTORY / "probe-results.json"
+    add("models probed", probe.exists(), "Run factory/bin/probe once so every selector resolves")
+    git_ok = subprocess.run(["git", "rev-parse", "--is-inside-work-tree"], cwd=REPO, capture_output=True).returncode == 0
+    add("repo is a git checkout", git_ok, "Run the factory from a git checkout with a GitHub origin")
+    return checks
+
+
+def board_log():
+    folder = FACTORY / "programs"
+    folder.mkdir(parents=True, exist_ok=True)
+    return open(folder / "board.log", "a")
+
+
+def spawn(args, env=None):
+    """Start a factory command and return without waiting. Output goes to board.log."""
+    full_env = os.environ.copy()
+    full_env.update(env or {})
+    log = board_log()
+    stamp = datetime.now().strftime("%H:%M:%S")
+    proc = subprocess.Popen(
+        [sys.executable, *[str(a) for a in args]],
+        cwd=REPO,
+        stdin=subprocess.DEVNULL,
+        stdout=log,
+        stderr=subprocess.STDOUT,
+        env=full_env,
+        start_new_session=True,
+    )
+    log.write(f"{stamp} pid {proc.pid} $ {' '.join(str(a) for a in args)}\n")
+    log.flush()
+    return proc
+
+
+def run_checked(args, stdin="", env=None):
+    full_env = os.environ.copy()
+    full_env.update(env or {})
+    result = subprocess.run(
+        [sys.executable, *[str(a) for a in args]],
+        cwd=REPO,
+        input=stdin,
+        text=True,
+        capture_output=True,
+        env=full_env,
+    )
+    if result.returncode != 0:
+        raise RuntimeError((result.stderr or result.stdout).strip() or "command failed")
+    return (result.stdout or "").strip()
+
+
+def program_for_issue(number):
+    folder = FACTORY / "programs"
+    if not folder.exists():
+        return None
+    for path in folder.glob("*/program.json"):
+        program = read_json(path)
+        for ticket in program.get("tickets") or []:
+            if str(ticket.get("issue")) == str(number):
+                return program["id"]
+    return None
+
+
+def job_for_issue(number):
+    for path in (FACTORY / "jobs").glob("*/job.json") if (FACTORY / "jobs").exists() else []:
+        job = read_json(path)
+        if str(job.get("issue")) == str(number):
+            return job
+    return None
+
+
+class Handler(SimpleHTTPRequestHandler):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, directory=str(FACTORY), **kwargs)
+
+    def end_headers(self):
+        self.send_header("Cache-Control", "no-store")
+        super().end_headers()
+
+    def do_GET(self):
+        path = self.path.split("?", 1)[0]
+        if path in {"/", "/dashboard.html"}:
+            body = (FACTORY / "dashboard.html").read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if path == "/api/state":
+            self._json(200, state())
+            return
+        if path == "/api/readiness":
+            self._json(200, {"checks": readiness()})
+            return
+        super().do_GET()
+
+    def do_POST(self):
+        path = self.path.split("?", 1)[0]
+        length = int(self.headers.get("Content-Length") or 0)
+        raw = self.rfile.read(length).decode() if length else ""
+        try:
+            payload = json.loads(raw) if raw else {}
+        except json.JSONDecodeError:
+            self._json(400, {"error": "expected JSON"})
+            return
+        try:
+            self._post(path, payload)
+        except RuntimeError as exc:
+            self._json(400, {"error": str(exc)})
+
+    def _post(self, path, payload):
+        if path == "/api/programs":
+            title = (payload.get("title") or "").strip()
+            prd = payload.get("prd") or ""
+            program_id = run_checked([PROGRAM, "new", title], stdin=prd)
+            spawn([PROGRAM, "step", program_id])
+            self._json(202, {"id": program_id, "stage": "research"})
+            return
+        parts = [part for part in path.split("/") if part]
+        if len(parts) >= 4 and parts[0] == "api" and parts[1] == "programs":
+            self._program_action(parts[2], parts[3], parts[4:], payload)
+            return
+        if len(parts) == 4 and parts[0] == "api" and parts[1] == "jobs":
+            self._job_action(parts[2], parts[3], payload)
+            return
+        self._json(404, {"error": "unknown action"})
+
+    def _program_action(self, program_id, action, rest, payload):
+        text = payload.get("text") or payload.get("notes") or ""
+        if action == "approve-prd":
+            run_checked([PROGRAM, "approve-prd", program_id])
+            spawn([PROGRAM, "step", program_id])
+            self._json(202, {"id": program_id, "stage": "plan"})
+        elif action == "revise-prd":
+            run_checked([PROGRAM, "revise-prd", program_id], stdin=text)
+            spawn([PROGRAM, "step", program_id])
+            self._json(202, {"id": program_id, "stage": "research"})
+        elif action == "approve-tickets":
+            run_checked([PROGRAM, "approve-tickets", program_id])
+            spawn([PROGRAM, "step", program_id])
+            self._json(202, {"id": program_id, "stage": "implementing"})
+        elif action == "change":
+            run_checked([PROGRAM, "change", program_id], stdin=text)
+            spawn([PROGRAM, "step", program_id])
+            self._json(202, {"id": program_id, "stage": "research"})
+        elif action == "decide" and rest and rest[0].isdigit():
+            run_checked([PROGRAM, "decide", program_id, rest[0]], stdin=text)
+            spawn([PROGRAM, "step", program_id])
+            self._json(202, {"id": program_id, "decided": int(rest[0])})
+        elif action == "accept-release":
+            run_checked([PROGRAM, "accept-release", program_id])
+            self._json(200, {"id": program_id, "stage": "done"})
+        elif action in {"start", "continue"}:
+            spawn([PROGRAM, "step", program_id])
+            self._json(202, {"id": program_id, "started": True})
+        else:
+            self._json(404, {"error": "unknown program action"})
+
+    def _job_action(self, number, action, payload):
+        text = payload.get("text") or ""
+        if action == "feedback":
+            run_checked([JOB, "feedback", number], stdin=text)
+            spawn([RUN, number])
+            self._json(202, {"issue": number, "action": action})
+            return
+        if action == "answer":
+            run_checked([RUN, "answer", number], stdin=text, env={"FACTORY_NO_DRAIN": "1"})
+            spawn([RUN, number])
+            self._json(202, {"issue": number, "action": action})
+            return
+        if action == "reject":
+            run_checked([RUN, "reject", number], stdin=text)
+            self._json(200, {"issue": number, "action": action})
+            return
+        if action == "merge":
+            job = job_for_issue(number)
+            if not job or not job.get("pr"):
+                raise RuntimeError(f"issue {number} has no pull request to merge")
+            command = ["gh", "pr", "merge", str(job["pr"]), f"--{CONFIG.get('merge_method', 'merge')}"]
+            result = subprocess.run(command, cwd=REPO, capture_output=True, text=True)
+            detail = (result.stderr or "") + (result.stdout or "")
+            if result.returncode != 0 and "Base branch was modified" in detail:
+                time.sleep(2)
+                result = subprocess.run(command, cwd=REPO, capture_output=True, text=True)
+            if result.returncode != 0:
+                raise RuntimeError((result.stderr or result.stdout).strip() or "merge failed")
+            program_id = program_for_issue(number)
+            if program_id:
+                # The merge may unlock tickets. `program step` runs `job queue`,
+                # which records the merge, then starts what is ready or drafts the release.
+                spawn([PROGRAM, "step", program_id])
+            else:
+                spawn([RUN, "status"])
+            self._json(200, {"issue": number, "merged": True, "program": program_id})
+            return
+        self._json(404, {"error": "unknown job action"})
+
+    def _json(self, status, payload):
+        body = json.dumps(payload).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, fmt, *args):
+        stamp = datetime.now().strftime("%H:%M:%S")
+        sys.stderr.write("%s %s - %s\n" % (stamp, self.address_string(), fmt % args))
+
+
+def main(argv):
+    port = int(argv[0]) if argv else 8000
+    os.chdir(FACTORY)
+    server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    print(f"board: http://127.0.0.1:{port}/")
+    server.serve_forever()
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

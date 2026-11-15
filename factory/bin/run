@@ -1,0 +1,622 @@
+#!/usr/bin/env python3
+"""Orchestrator: drain GitHub issues labeled factory through local omp agents.
+
+Scripts own state. This process only starts omp roles and calls factory/bin/*.
+
+Usage:
+  run                     drain the queue (concurrency jobs at a time); also resumes
+  run <n>                 one issue now
+  run status              queue + summary
+  run feedback <n>        stdin → next build round for a needs-human job
+  run reject <n>          stdin → reject a waiting job
+  run answer <n>          stdin → comment on a needs-info issue, then resume intake
+
+FACTORY_NO_DRAIN=1 makes feedback and answer record the input and return
+without running the job; the caller starts `run <n>` itself.
+"""
+
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parents[2]
+FACTORY = REPO / "factory"
+BIN = FACTORY / "bin"
+CONFIG = json.loads((FACTORY / "config.json").read_text())
+CONCURRENCY = CONFIG["concurrency"]
+BASE = CONFIG["base_branch"]
+
+
+def die(msg):
+    print(f"run: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def sh(cmd, check=True, stdin=None):
+    res = subprocess.run(cmd, cwd=REPO, capture_output=True, text=True, input=stdin)
+    if check and res.returncode != 0:
+        err = (res.stderr or res.stdout).strip()
+        die(err or f"`{' '.join(cmd)}` failed ({res.returncode})")
+    return res
+
+
+def job(*args, check=True, stdin=None):
+    return sh([str(BIN / "job"), *args], check=check, stdin=stdin)
+
+
+def gate(job_id, merge=False):
+    args = [str(BIN / "gate"), job_id]
+    if merge:
+        args.append("--merge")
+    return sh(args, check=False)
+
+
+def nudge_build(job_id):
+    """One pre-gate check, the omp equivalent of the upstream builder Stop hook."""
+    return sh([str(BIN / "gate"), "--nudge", job_id], check=False)
+
+
+def route(job_id):
+    return sh([str(BIN / "route"), job_id])
+
+
+def agent(job_id, role, *args, check=True):
+    return sh([str(BIN / "agent"), job_id, role, *args], check=check)
+
+
+def load(job_id):
+    return json.loads((FACTORY / "jobs" / job_id / "job.json").read_text())
+
+
+def first_line(path):
+    p = Path(path)
+    return p.read_text().split("\n", 1)[0].strip() if p.exists() else None
+
+
+def header(path):
+    fields = {}
+    p = Path(path)
+    if not p.exists():
+        return fields
+    for line in p.read_text().splitlines():
+        if not line.strip():
+            break
+        key, _, value = line.partition(":")
+        fields[key.strip().upper()] = value.strip()
+    return fields
+
+
+def port_for(job, kind):
+    n = int(job["id"].split("-", 1)[0])
+    base = CONFIG["ports"]["base"]
+    step = CONFIG["ports"]["step"]
+    off = {"builder": 0, "ux": 1, "ui": 2}[kind]
+    return base + step * n + off
+
+
+def log(job_id, msg):
+    print(f"{time.strftime('%H:%M:%S')} {job_id}: {msg}", flush=True)
+
+
+def escalate_env(job_id, why):
+    """Stop a job the scripts cannot advance: write decision.md via a fake escalate.
+
+    We only do this when omp itself failed. job advance to needs-human from
+    build requires STATUS: BLOCKED, from approve requires ESCALATE, etc.
+    The operator sees the reason on stderr and in the job log.
+    """
+    d = FACTORY / "jobs" / job_id
+    (d / "logs").mkdir(exist_ok=True)
+    (d / "logs" / "orchestrator.log").write_text(
+        (d / "logs" / "orchestrator.log").read_text() + why + "\n"
+        if (d / "logs" / "orchestrator.log").exists() else why + "\n"
+    )
+    print(f"{job_id}: STOPPED: {why}", file=sys.stderr, flush=True)
+
+
+def job_path(job_id, *parts):
+    return FACTORY / "jobs" / job_id / Path(*parts)
+
+
+def can_resume_builder(job_id):
+    root = job_path(job_id, "sessions", "builder")
+    return root.exists() and any(root.rglob("*.jsonl"))
+
+
+def run_intake(job_id):
+    agent(job_id, "intake")
+    d = header(job_path(job_id, "intake.md")).get("DECISION")
+    if d == "ACCEPT":
+        job("sync", job_id)
+        route(job_id)
+        job("advance", job_id, "spec")
+        log(job_id, "intake ACCEPT → spec")
+        return "spec"
+    if d == "NEEDS-INFO":
+        job("advance", job_id, "needs-info")
+        log(job_id, "intake NEEDS-INFO")
+        return "needs-info"
+    if d == "REJECT":
+        job("advance", job_id, "rejected")
+        log(job_id, "intake REJECT")
+        return "rejected"
+    die(f"{job_id}: intake.md missing DECISION (got {d!r})")
+
+
+def run_spec(job_id):
+    agent(job_id, "spec-writer")
+    job("advance", job_id, "build")
+    log(job_id, "spec → build")
+    return "build"
+
+
+# job advance refuses these when a READY build is not actually shippable.
+# The builder can fix each one; anything else is left for the operator.
+BUILDER_FIXABLE = (
+    "uncommitted changes",
+    "no commits on top of",
+    "isn't pushed",
+    "expected one open PR",
+    "not STATUS: READY",
+)
+VERDICT_LINE = re.compile(r"VERDICT:\s*(PASS|CHANGES)\s*$")
+
+
+def refusal_text(res):
+    return (res.stderr or res.stdout or "").strip() or f"job advance failed ({res.returncode})"
+
+
+def builder_can_fix(text):
+    return any(phrase in text for phrase in BUILDER_FIXABLE)
+
+
+def refill_ready():
+    """Label tickets a merge just unlocked, so a free slot does not sit idle."""
+    res = sh([sys.executable, str(BIN / "program"), "refill"], check=False)
+    sys.stdout.write(res.stdout or "")
+    sys.stderr.write(res.stderr or "")
+
+
+def run_build(job_id, extra=None, *, refused_once=False, nudged_once=False):
+    j = load(job_id)
+    conflict = job_path(job_id, "sync-conflict.md")
+    if j.get("sync_round") and conflict.exists():
+        note = "Resolve the merge conflict in sync-conflict.md before anything else.\n" + conflict.read_text()[:2500]
+        extra = note if not extra else note + "\n\n" + extra
+    args = []
+    if can_resume_builder(job_id):
+        args.append("--resume")
+    args += ["--port", str(port_for(j, "builder"))]
+    # default_prompt in agent covers a plain round. Pass an explicit prompt
+    # when the orchestrator has review, gate, or advance-refusal context.
+    if extra:
+        args.append(extra)
+    agent(job_id, "builder", *args)
+    status = first_line(job_path(job_id, "build.md"))
+    if status == "STATUS: READY":
+        if not nudged_once:
+            nudge = nudge_build(job_id)
+            if nudge.returncode != 0:
+                why = (nudge.stderr or nudge.stdout or "").strip() or "the checks failed"
+                log(job_id, f"build READY but checks failed → builder once ({why.splitlines()[0]})")
+                return run_build(
+                    job_id,
+                    extra=(
+                        "The build is not ready yet. The checks that the gate will run failed:\n"
+                        f"{why}\n"
+                        "Fix that in the worktree, push, and update build.md with STATUS: READY."
+                    ),
+                    refused_once=refused_once,
+                    nudged_once=True,
+                )
+        res = job("advance", job_id, "gate", check=False)
+        if res.returncode != 0:
+            why = refusal_text(res)
+            if refused_once or not builder_can_fix(why):
+                die(f"{job_id}: cannot leave build:\n{why}")
+            log(job_id, f"build READY refused → builder once ({why.splitlines()[0]})")
+            return run_build(
+                job_id,
+                extra=(
+                    "job advance refused to move this job from build to gate:\n"
+                    f"{why}\n"
+                    "Commit outstanding work, push this branch, and open exactly one "
+                    "draft pull request if there isn't one. Then update build.md with STATUS: READY."
+                ),
+                refused_once=True,
+                nudged_once=nudged_once,
+            )
+        log(job_id, f"build READY → gate (round {load(job_id)['round']})")
+        return "gate"
+    if status == "STATUS: BLOCKED":
+        job("advance", job_id, "needs-human")
+        log(job_id, "build BLOCKED → needs-human")
+        return "needs-human"
+    die(f"{job_id}: build.md starts with {status!r}")
+
+
+def finished_review(job_id, reviewer, round_n):
+    """A review is finished when the verdict cites a command and its exit code."""
+    path = job_path(job_id, f"round-{round_n}", f"review-{reviewer}.md")
+    if not path.exists():
+        return False
+    text = path.read_text()
+    line = text.split("\n", 1)[0].strip()
+    if not VERDICT_LINE.fullmatch(line):
+        return False
+    return "## Evidence" in text and re.search(r"`[^`\n]+`.+\bexit\s+\d+", text, re.I) is not None
+
+
+def run_gate(job_id):
+    res = gate(job_id)
+    line = (res.stdout or "").strip().splitlines()[-1] if res.stdout else ""
+    print(line, flush=True)
+    j = load(job_id)
+    if res.returncode == 0:
+        job("advance", job_id, "review")
+        log(job_id, f"gate PASS → review ({', '.join((j.get('agents') or {}).get('reviewers') or {})})")
+        return "review"
+    nxt = job("advance", job_id, "build", check=False)
+    if nxt.returncode == 0:
+        n = load(job_id)["round"]
+        log(job_id, f"gate FAIL → build round {n}")
+        return run_build(
+            job_id,
+            extra=(
+                f"The gate failed: read round-{n - 1}/checks.md and checks.log, "
+                f"fix it, push, and update build.md."
+            ),
+        )
+    job("advance", job_id, "needs-human")
+    log(job_id, "gate FAIL, last round → needs-human")
+    return "needs-human"
+
+
+def run_review(job_id):
+    j = load(job_id)
+    reviewers = list(((j.get("agents") or {}).get("reviewers") or {}).keys())
+    if not reviewers:
+        die(f"{job_id}: no reviewers routed")
+    n = j["round"]
+    pending = [r for r in reviewers if not finished_review(job_id, r, n)]
+    kept = [r for r in reviewers if r not in pending]
+    if kept:
+        log(job_id, f"review round {n} keeping {', '.join(kept)}")
+
+    def one(r):
+        args = []
+        if r in {"ux", "ui"}:
+            args += ["--port", str(port_for(j, r))]
+        agent(job_id, f"reviewer-{r}", *args)
+        job("sync", job_id)
+        return r
+
+    if pending:
+        with ThreadPoolExecutor(max_workers=max(1, len(pending))) as pool:
+            futs = [pool.submit(one, r) for r in pending]
+            for f in futs:
+                f.result()
+
+    j = load(job_id)
+    job("sync", job_id)
+    j = load(job_id)
+    changes = [r for r, v in (j.get("reviews") or {}).items() if v == "CHANGES"]
+    if not changes:
+        job("advance", job_id, "approve")
+        log(job_id, f"review PASS → approve")
+        return "approve"
+    nxt = job("advance", job_id, "build", check=False)
+    if nxt.returncode == 0:
+        n2 = load(job_id)["round"]
+        log(job_id, f"review CHANGES from {', '.join(changes)} → build round {n2}")
+        return run_build(
+            job_id,
+            extra=(
+                f"Round {n} reviews are in round-{n}/. Address every VERDICT: CHANGES, "
+                f"push, and update build.md for round {n2}."
+            ),
+        )
+    job("advance", job_id, "needs-human")
+    log(job_id, "review rounds exhausted → needs-human")
+    return "needs-human"
+
+
+def run_approve(job_id):
+    agent(job_id, "approver")
+    line = first_line(job_path(job_id, "decision.md"))
+    if line == "APPROVE":
+        job("merge", job_id)
+        log(job_id, f"approver APPROVE → {load(job_id)['stage']}")
+        return load(job_id)["stage"]
+    if line == "ESCALATE":
+        job("advance", job_id, "needs-human")
+        log(job_id, "approver ESCALATE → needs-human")
+        return "needs-human"
+    die(f"{job_id}: decision.md starts with {line!r}")
+
+
+def run_merging(job_id):
+    job("merge", job_id)
+    return load(job_id)["stage"]
+
+
+STAGE_RUNNERS = {
+    "intake": run_intake,
+    "spec": run_spec,
+    "build": run_build,
+    "gate": run_gate,
+    "review": run_review,
+    "approve": run_approve,
+    "merging": run_merging,
+}
+
+WAITING = {"needs-info", "needs-human", "merged", "rejected"}
+
+
+def run_job(job_id):
+    """Drive one job until it waits or finishes. Safe to call on resume."""
+    try:
+        while True:
+            j = load(job_id)
+            stage = j["stage"]
+            if stage in WAITING:
+                return stage
+            runner = STAGE_RUNNERS.get(stage)
+            if not runner:
+                die(f"{job_id}: unknown stage {stage}")
+            stage = runner(job_id)
+            if stage in WAITING:
+                return stage
+    except SystemExit:
+        raise
+    except Exception as e:
+        escalate_env(job_id, f"{type(e).__name__}: {e}")
+        raise
+
+
+def parse_queue(quiet=False):
+    out = job("queue").stdout.strip()
+    rows = []
+    if not out:
+        return rows
+    for line in out.splitlines():
+        parts = line.split("\t")
+        if len(parts) < 4:
+            continue
+        action, issue, job_id, stage = parts[0], parts[1], parts[2], parts[3]
+        note = parts[4] if len(parts) > 4 else ""
+        rows.append((action, issue, job_id, stage, note))
+        if not quiet:
+            print(line, flush=True)
+    return rows
+
+
+def ensure_models():
+    probe = BIN / "probe"
+    if not probe.exists():
+        die("factory/bin/probe is missing")
+    res = sh([str(probe)], check=False)
+    sys.stdout.write(res.stdout)
+    sys.stderr.write(res.stderr)
+    if res.returncode != 0:
+        die("model probe failed. Fix factory/config.json models before a job starts.")
+
+
+def drain_lock():
+    """One drain at a time. Two drains would both `job create` the same issue.
+
+    Returns the open lock file, or None when another run holds it.
+    """
+    import fcntl
+    (FACTORY / "jobs").mkdir(parents=True, exist_ok=True)
+    handle = open(FACTORY / "jobs" / ".run.lock", "a+")
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.close()
+        return None
+    return handle
+
+
+def program_for_issue(number):
+    folder = FACTORY / "programs"
+    if not folder.exists():
+        return None
+    for path in folder.glob("*/program.json"):
+        program = json.loads(path.read_text())
+        for ticket in program.get("tickets") or []:
+            if str(ticket.get("issue")) == str(number):
+                return program.get("id")
+    return None
+
+
+def program_running(program_id):
+    path = FACTORY / "programs" / program_id / "running"
+    if not path.exists():
+        return False
+    try:
+        pid = int(path.read_text().strip())
+    except ValueError:
+        return False
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def advance_programs(job_ids):
+    """Step each program that just merged a ticket.
+
+    `implement` keeps going after its own drain. A feedback run, `run <issue>`,
+    or a drain started from the terminal merges and returns, and the next
+    ticket stays unlabeled until someone presses Step. This runs only after
+    the drain lock is released, so the step can drain the next wave. A program
+    whose step is already in progress is left alone: that step sees the merge
+    when its drain returns.
+    """
+    programs = []
+    for job_id in job_ids:
+        path = FACTORY / "jobs" / job_id / "job.json"
+        if not path.exists():
+            continue
+        record = json.loads(path.read_text())
+        if record.get("stage") != "merged" or not record.get("issue"):
+            continue
+        program_id = program_for_issue(record["issue"])
+        if program_id and program_id not in programs:
+            programs.append(program_id)
+    for program_id in programs:
+        if program_running(program_id):
+            print(f"factory: {program_id} is already stepping", flush=True)
+            continue
+        print(f"factory: {program_id} merged a ticket; stepping", flush=True)
+        res = sh([sys.executable, str(BIN / "program"), "step", program_id], check=False)
+        sys.stdout.write(res.stdout)
+        sys.stderr.write(res.stderr)
+
+
+def drain(only_issue=None):
+    lock = drain_lock()
+    if lock is None:
+        print("factory: another run is draining the queue; it will pick up this issue." if only_issue
+              else "factory: another run is already draining the queue.")
+        return
+    try:
+        job_ids = _drain(only_issue)
+    finally:
+        lock.close()
+    advance_programs(job_ids)
+
+
+def _drain(only_issue=None):
+    print(f"{time.strftime('%H:%M:%S')} factory: draining" + (f" issue #{only_issue}" if only_issue else " the queue"), flush=True)
+    ensure_models()
+    # Issues labeled a moment ago can be missing from `gh issue list`. FACTORY_EXPECT
+    # is the set program just labeled; wait until the search catches up.
+    expect = {n.strip() for n in os.environ.get("FACTORY_EXPECT", "").split(",") if n.strip()}
+    if only_issue is not None:
+        expect.add(str(only_issue))
+    running = {}
+    touched = []
+    waited = 0
+    idle_refilled = False
+    with ThreadPoolExecutor(max_workers=CONCURRENCY) as pool:
+        while True:
+            if expect and not running and waited < 20:
+                rows = parse_queue(quiet=True)
+                seen = {row[1] for row in rows if row[0] in {"new", "resume", "hold"}}
+                if not expect <= seen:
+                    waited += 1
+                    missing = ", ".join("#" + n for n in sorted(expect - seen, key=int))
+                    print(f"{time.strftime('%H:%M:%S')} factory: waiting for {missing} to show in the queue ({waited})", flush=True)
+                    time.sleep(1)
+                    continue
+                expect = set()
+            rows = parse_queue()
+            if only_issue is not None:
+                want = str(only_issue)
+                rows = [r for r in rows if r[1] == want]
+            for action, issue, job_id, stage, note in rows:
+                if action not in {"new", "resume"}:
+                    continue
+                if action == "new":
+                    job_id = job("create", issue).stdout.strip()
+                if job_id in running:
+                    continue
+                touched.append(job_id)
+                log(job_id, f"start ({stage if action == 'resume' else 'intake'})")
+                running[job_id] = pool.submit(run_job, job_id)
+                idle_refilled = False
+            if not running:
+                if only_issue is None and touched and not idle_refilled:
+                    idle_refilled = True
+                    refill_ready()
+                    continue
+                break
+            done, _ = wait(running.values(), return_when=FIRST_COMPLETED)
+            for jid, fut in list(running.items()):
+                if fut in done:
+                    running.pop(jid)
+                    try:
+                        stage = fut.result()
+                        log(jid, f"parked at {stage}" if stage in WAITING else f"ended {stage}")
+                        if only_issue is None and stage in WAITING | {"merged"}:
+                            refill_ready()
+                    except Exception as e:
+                        log(jid, f"failed: {e}")
+            if only_issue is not None and not running:
+                # After the one issue parks, don't pick up the rest of the queue.
+                break
+            time.sleep(0.2)
+    ids = list(dict.fromkeys(touched))
+    if ids:
+        print(job("summary", *ids).stdout, end="")
+    else:
+        print("factory: nothing queued.")
+    print(job("queue").stdout, end="")
+    return ids
+
+
+def cmd_status():
+    print(job("queue").stdout, end="")
+    print(job("summary").stdout, end="")
+
+
+NO_DRAIN = os.environ.get("FACTORY_NO_DRAIN") == "1"
+
+
+def cmd_feedback(n, text):
+    print(job("feedback", n, stdin=text).stdout, end="")
+    if not NO_DRAIN:
+        drain(only_issue=int(n))
+
+
+def cmd_reject(n, text):
+    print(job("reject", n, stdin=text).stdout, end="")
+
+
+def cmd_answer(n, text):
+    sh(["gh", "issue", "comment", str(n), "--body", text])
+    jid = None
+    for p in (FACTORY / "jobs").iterdir() if (FACTORY / "jobs").exists() else []:
+        if not (p / "job.json").exists():
+            continue
+        j = json.loads((p / "job.json").read_text())
+        if j["issue"] == int(n):
+            jid = j["id"]
+            break
+    if not jid:
+        die(f"no job for issue #{n}")
+    job("advance", jid, "intake")
+    if not NO_DRAIN:
+        drain(only_issue=int(n))
+
+
+def main(argv):
+    if argv and argv[0] in {"-h", "--help"}:
+        print(__doc__.strip())
+        return
+    if not argv:
+        drain()
+    elif argv == ["status"]:
+        cmd_status()
+    elif len(argv) == 1 and argv[0].isdigit():
+        drain(only_issue=int(argv[0]))
+    elif argv[0] == "feedback" and len(argv) == 2:
+        cmd_feedback(argv[1], sys.stdin.read())
+    elif argv[0] == "reject" and len(argv) == 2:
+        cmd_reject(argv[1], sys.stdin.read())
+    elif argv[0] == "answer" and len(argv) == 2:
+        cmd_answer(argv[1], sys.stdin.read())
+    else:
+        die(f"bad arguments: {' '.join(argv)}\n\n{__doc__.strip()}")
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

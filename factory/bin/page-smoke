@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+# Start the configured page and reject a document that has no controls.
+# The gate runs this from the main checkout, with the job worktree as cwd.
+# No `page.start` in config means this repo is not a web app: exit 0.
+set -euo pipefail
+if [[ -n "${FACTORY_REPO:-}" ]]; then
+  factory="${FACTORY_REPO}/factory"
+else
+  factory="$(cd "$(dirname "$0")/.." && pwd)"
+fi
+cfg="${FACTORY_CONFIG:-$factory/config.json}"
+if [[ ! -f "$cfg" ]]; then
+  exit 0
+fi
+spec="$(python3 - "$cfg" <<'PY'
+import json, sys
+page = (json.load(open(sys.argv[1])).get("page") or {})
+start = page.get("start")
+if not start:
+    raise SystemExit(0)
+print(page.get("port_env") or "PORT")
+print(start)
+print(page.get("path") or "/")
+PY
+)" || exit 0
+if [[ -z "$spec" ]]; then
+  exit 0
+fi
+port_env="$(printf '%s\n' "$spec" | sed -n '1p')"
+start="$(printf '%s\n' "$spec" | sed -n '2p')"
+path="$(printf '%s\n' "$spec" | sed -n '3p')"
+port="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')"
+page_file="$(mktemp)"
+server_pid=""
+session="factory-page-$$"
+cleanup() {
+  if [[ -n "$server_pid" ]]; then
+    kill "$server_pid" 2>/dev/null || true
+    wait "$server_pid" 2>/dev/null || true
+  fi
+  if command -v agent-browser >/dev/null 2>&1; then
+    agent-browser --session "$session" close >/dev/null 2>&1 || true
+  fi
+  rm -f "$page_file"
+}
+trap cleanup EXIT
+env "${port_env}=${port}" bash -c "$start" >/dev/null 2>&1 &
+server_pid=$!
+ready=0
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+  if curl -fsS "http://127.0.0.1:${port}${path}" -o "$page_file" 2>/dev/null; then
+    ready=1
+    break
+  fi
+  sleep 0.25
+done
+if [[ "$ready" -ne 1 ]]; then
+  echo "page smoke: nothing answered on port ${port}${path}" >&2
+  exit 1
+fi
+if ! grep -Eiq '<button|<input' "$page_file"; then
+  echo "page smoke: the document has no button or input. Empty sections are not a page." >&2
+  exit 1
+fi
+if ! command -v agent-browser >/dev/null 2>&1; then
+  echo "page smoke: HTML has controls; agent-browser is not installed, so the click-through was skipped." >&2
+  exit 0
+fi
+agent-browser --session "$session" open "http://127.0.0.1:${port}${path}" >/dev/null
+shot="$(agent-browser --session "$session" snapshot)"
+low="$(printf '%s' "$shot" | tr '[:upper:]' '[:lower:]')"
+if [[ "$low" != *button* && "$low" != *textbox* ]]; then
+  echo "page smoke: the browser snapshot has no button or textbox." >&2
+  printf '%s\n' "$shot" >&2
+  exit 1
+fi

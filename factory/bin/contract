@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Shipped behavior the branch is not allowed to weaken, then the page smoke.
+# Runs with the job worktree as cwd. Frozen copies live next to this factory.
+set -euo pipefail
+here="$(cd "$(dirname "$0")" && pwd)"
+if [[ -n "${FACTORY_REPO:-}" ]]; then
+  factory="${FACTORY_REPO}/factory"
+else
+  factory="$(cd "$here/.." && pwd)"
+fi
+frozen="$factory/contract/frozen"
+if [[ -d "$frozen" ]]; then
+  while IFS= read -r -d '' saved; do
+    rel="${saved#"$frozen"/}"
+    if [[ ! -f "$rel" ]]; then
+      echo "shipped test removed: $rel" >&2
+      exit 1
+    fi
+    if ! cmp -s "$saved" "$rel"; then
+      echo "shipped test changed: $rel" >&2
+      exit 1
+    fi
+  done < <(find "$frozen" -type f -print0)
+fi
+bash "$here/page-smoke"
