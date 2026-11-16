@@ -66,6 +66,8 @@ function el() {
     textContent: "",
     value: "",
     dataset: {},
+    style: {},
+    attrs: {},
     children: [],
     listeners: { click: [] },
     append(...nodes) {
@@ -73,6 +75,9 @@ function el() {
     },
     replaceChildren(...nodes) {
       this.children = [...nodes];
+    },
+    setAttribute(name, value) {
+      this.attrs[name] = value;
     },
     addEventListener(type, fn) {
       this.listeners[type] = this.listeners[type] || [];
@@ -187,7 +192,7 @@ async function openAndSit(doc, roomName, seatName, color) {
   await until(() => boardText(doc).includes(seatName) && "seated");
 }
 
-test("poll delay is 1500 and a non-position fen is still painted", () => {
+test("poll delay is 1500 and a non-position fen is still painted", async () => {
   assert.equal(POLL_MS, 1500);
   const odd = "qqqqqqqq/8/8/8/8/8/8/4k1K";
   const squares = squaresFromFen(`${odd} w - - 0 1`);
@@ -214,7 +219,18 @@ test("poll delay is 1500 and a non-position fen is still painted", () => {
   });
   doc.input.value = "Odd";
   doc.buttons.open.click();
-  return until(() => boardText(doc).includes(odd) && boardText(doc));
+  await until(() => boardText(doc).includes(odd) && boardText(doc));
+  const grid = doc.getElementById("board").children.find((node) => node.style.display === "grid");
+  assert.equal(grid.style.gridTemplateColumns, "repeat(8, minmax(0, 1fr))");
+  const labeled = [];
+  function walk(node) {
+    if (node.attrs?.["aria-label"]) labeled.push(node.attrs["aria-label"]);
+    for (const child of node.children || []) walk(child);
+  }
+  walk(grid);
+  assert.equal(labeled[0], "a8");
+  assert.equal(labeled.at(-1), "h1");
+  assert.equal(labeled.length, 64);
 });
 
 test("the page is the room board and tournaments stays empty", async (t) => {
@@ -226,7 +242,8 @@ test("the page is the room board and tournaments stays empty", async (t) => {
   for (const id of ["rooms", "board", "tournaments"]) {
     assert.match(html, new RegExp(`id="${id}"`));
   }
-  assert.match(html, /<input[^>]*type="text"/);
+  assert.match(html, /<label for="name">Name<\/label>/);
+  assert.match(html, /<input[^>]*id="name"/);
   assert.match(html, /<button/);
   assert.match(html, /<div id="tournaments"><\/div>/);
   const script = await fetch(`http://127.0.0.1:${server.port}/play.js`);
@@ -367,4 +384,72 @@ test("two sessions play, poll, and show seat and move errors", async (t) => {
   assert.equal(roomButtons(gone).length, 0);
   assert.equal(boardText(gone), "");
   assert.equal(gone.getElementById("tournaments").children.length, 0);
+});
+
+test("an error stays through a poll and a sit needs a chosen room", async () => {
+  const doc = page();
+  const timers = [];
+  let polls = 0;
+  session(doc, "", timers, async (url, init) => {
+    if (String(url) === "/api/rooms" && init?.method === "POST") {
+      const name = JSON.parse(init.body).name;
+      if (!name) return Response.json({ error: "A room needs a name." }, { status: 400 });
+      return Response.json({
+        id: "room-err",
+        name,
+        moves: [],
+        status: "playing",
+        winner: null,
+        fen: `${START_PLACEMENT} w KQkq - 0 1`,
+        white: null,
+        black: null,
+      });
+    }
+    if (String(url).endsWith("/join")) {
+      return Response.json({
+        token: "white-token",
+        room: {
+          id: "room-err",
+          name: "Club",
+          moves: [],
+          status: "playing",
+          winner: null,
+          fen: `${START_PLACEMENT} w KQkq - 0 1`,
+          white: "Ada",
+          black: null,
+        },
+      });
+    }
+    if (String(url).endsWith("/move")) {
+      return Response.json({ error: "That move is not legal." }, { status: 400 });
+    }
+    polls += 1;
+    return Response.json({
+      id: "room-err",
+      name: "Club",
+      moves: [],
+      status: "playing",
+      winner: null,
+      fen: `${START_PLACEMENT} w KQkq - 0 1`,
+      white: "Ada",
+      black: null,
+    });
+  });
+  doc.buttons["sit-white"].click();
+  await until(() => boardText(doc).includes("Choose a room before sitting.") && "need-room");
+  doc.input.value = "";
+  doc.buttons.open.click();
+  await until(() => boardText(doc).includes("A room needs a name.") && "need-name");
+  doc.input.value = "Club";
+  doc.buttons.open.click();
+  await until(() => boardText(doc).includes(START_PLACEMENT) && "opened");
+  doc.input.value = "Ada";
+  doc.buttons["sit-white"].click();
+  await until(() => boardText(doc).includes("Ada") && "sat");
+  clickSquare(doc, "a1");
+  clickSquare(doc, "a2");
+  await until(() => boardText(doc).includes("That move is not legal.") && "illegal");
+  await timers.filter(Boolean).at(-1).fn();
+  assert.equal(polls > 0, true);
+  assert.match(boardText(doc), /That move is not legal./);
 });

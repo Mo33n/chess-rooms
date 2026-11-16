@@ -99,7 +99,14 @@ export function mount(doc, options = {}) {
 
     boardEl.replaceChildren();
     const room = chosen && known.get(chosen);
-    if (!room) return;
+    if (!room) {
+      if (error) {
+        const note = doc.createElement("p");
+        note.textContent = error;
+        boardEl.append(note);
+      }
+      return;
+    }
 
     const status = doc.createElement("p");
     status.textContent = room.status;
@@ -114,10 +121,15 @@ export function mount(doc, options = {}) {
     fen.dataset.role = "fen";
     fen.textContent = placementOf(room.fen);
     const grid = doc.createElement("div");
+    grid.style.display = "grid";
+    grid.style.gridTemplateColumns = "repeat(8, minmax(0, 1fr))";
     for (const cell of squaresFromFen(room.fen)) {
       const square = doc.createElement("button");
       square.type = "button";
       square.dataset.square = cell.square;
+      square.setAttribute("aria-label", cell.square);
+      square.style.minWidth = "0";
+      square.style.width = "100%";
       square.textContent = cell.piece;
       square.addEventListener("click", () => onSquare(cell.square));
       grid.append(square);
@@ -171,7 +183,10 @@ export function mount(doc, options = {}) {
   }
 
   async function sit(color) {
-    if (!chosen) return;
+    if (!chosen) {
+      showError("Choose a room before sitting.");
+      return;
+    }
     const response = await request(`/api/rooms/${chosen}/join`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -239,7 +254,6 @@ export function mount(doc, options = {}) {
       showError(body.error || "");
       return;
     }
-    error = "";
     remember(body);
     paint();
   }
