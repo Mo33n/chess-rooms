@@ -266,7 +266,7 @@ test("opening a pairing sits both names, paints the start, and polls the room", 
   assert.equal(joins[1].req.name, "Bea");
   assert.equal(joins[1].req.color, "black");
   const poll = timers.filter(Boolean).at(-1);
-  assert.equal(poll.ms, 1500);
+  assert.equal(poll.ms, POLL_MS);
   const before = track.calls.filter((call) => call.method === "GET" && /\/api\/rooms\//.test(call.url)).length;
   await poll.fn();
   const after = track.calls.filter((call) => call.method === "GET" && /\/api\/rooms\//.test(call.url)).length;
