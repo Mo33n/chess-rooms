@@ -1,9 +1,17 @@
 import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { START_FEN, play } from "./chess.js";
 
 const page = new URL("../public/index.html", import.meta.url);
+const publicDir = fileURLToPath(new URL("../public/", import.meta.url));
+const publicTypes = {
+  ".html": "text/html; charset=utf-8",
+  ".js": "text/javascript; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+};
 const port = Number(process.env.PORT || 5180);
 const rooms = new Map();
 const tournaments = new Map();
@@ -101,6 +109,24 @@ function openRound(tournament, names) {
     });
   }
   tournament.rounds.push({ pairings });
+}
+
+async function servePublic(res, pathname) {
+  if (!pathname || pathname.includes("\0") || pathname.includes("..")) return false;
+  const relative = pathname.replace(/^\/+/, "");
+  if (!relative) return false;
+  const root = publicDir.endsWith(path.sep) ? publicDir : publicDir + path.sep;
+  const file = path.join(root, relative);
+  if (!file.startsWith(root)) return false;
+  try {
+    const body = await readFile(file);
+    const type = publicTypes[path.extname(file)] || "application/octet-stream";
+    res.writeHead(200, { "content-type": type });
+    res.end(body);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function readJson(req) {
@@ -307,6 +333,8 @@ createServer(async (req, res) => {
     send(res, 200, tournamentView(tournament));
     return;
   }
+
+  if (req.method === "GET" && (await servePublic(res, url.pathname))) return;
 
   send(res, 404, { error: "not found" });
 }).listen(port, "127.0.0.1", () => {

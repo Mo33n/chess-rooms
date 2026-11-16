@@ -13,7 +13,7 @@ PORT=5180 npm start
 
 `npm test` runs `factory/checks.sh`. The product contract is `factory/accept.sh`, which runs `node --test test/hidden/product.test.js`. Do not edit `test/hidden/` or `factory/accept.sh`.
 
-Open the printed URL. Type a name, open a room, sit white in one browser and black in another. The board polls every 1.5 seconds. Host a tournament from the page, enter at least two names, start it, and open each pairing's board.
+Open the printed URL. `public/index.html` loads `public/play.js`. A `GET` of a file in `public/` is served. Type a name, open a room, sit white in one browser and black in another. The board paints the server `fen`, sends the seated token, and polls every 1.5 seconds. Host a tournament from the page, enter at least two names, start it, and open each pairing's board.
 
 ## HTTP
 
@@ -27,7 +27,7 @@ Open the printed URL. Type a name, open a room, sit white in one browser and bla
 
 `POST /api/tournaments` `{ "name" }`, then `POST /api/tournaments/:id/players` `{ "name" }`. `GET /api/tournaments/:id` returns `players` as `{ "name", "score" }` (a win is 1, a draw is 0.5 each) and `rounds` of pairings `{ "white", "black", "roomId", "result" }`. `POST .../start` needs two or more players and opens a room for each pairing. `POST .../results` `{ "round", "white", "black", "result" }` records `1-0`, `0-1`, or `1/2-1/2` when the room is still `playing`, then sets that room to `finished`. A checkmate in the pairing's room records `1-0` or `0-1` itself. `POST .../next` starts another round after every pairing in the current round has a result.
 
-`GET /` is the page. It contains `id="rooms"`, `id="board"`, and `id="tournaments"`, plus controls to open a room, sit, move, and run a tournament.
+`GET /` is `public/index.html`. It contains `id="rooms"`, `id="board"`, and `id="tournaments"`, plus controls to open a room, sit, move, and run a tournament. `public/play.js` paints the server `fen` on that board, sends the token for the seat this page holds, and polls the chosen room every 1.5 seconds.
 
 ## Software factory
 
