@@ -6,10 +6,16 @@
 </head>
 <body>
   <h1>Chess Rooms</h1>
-  <p>The factory replaces this starter.</p>
-  <form><button type="submit">Open room</button></form>
+  <form>
+    <label for="name">Name</label>
+    <input type="text" id="name" name="name">
+    <button type="button" data-action="open">Open room</button>
+    <button type="button" data-action="sit-white">Sit white</button>
+    <button type="button" data-action="sit-black">Sit black</button>
+  </form>
   <div id="rooms"></div>
   <div id="board"></div>
   <div id="tournaments"></div>
+  <script type="module" src="/play.js"></script>
 </body>
 </html>
