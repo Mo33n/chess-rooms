@@ -13,7 +13,7 @@ PORT=5180 npm start
 
 `npm test` runs `factory/checks.sh`. The product contract is `factory/accept.sh`, which runs `node --test test/hidden/product.test.js`. Do not edit `test/hidden/` or `factory/accept.sh`.
 
-Open the printed URL. `public/index.html` loads `public/play.js`. A `GET` of a file in `public/` is served. Type a name, open a room, sit white in one browser and black in another. The board paints the server `fen`, sends the seated token, and polls every 1.5 seconds. Host a tournament from the page, enter at least two names, start it, and open each pairing's board.
+Open the printed URL. `public/index.html` loads `public/play.js`. A `GET` of a file in `public/` is served. Type a name, open a room, sit white in one browser and black in another. The board paints the server `fen`, sends the seated token, and polls every 1.5 seconds. Host a tournament from the page, add names one at a time, start it, and open each pairing's board. A draw on an unfinished pairing records `1/2-1/2`. Next round waits until every pairing in the current round has a result.
 
 ## HTTP
 
