@@ -17,15 +17,15 @@ Open the printed URL. Type a name, open a room, sit white in one browser and bla
 
 ## HTTP
 
-`POST /api/rooms` `{ "name" }` creates a room.
+`POST /api/rooms` `{ "name" }` creates a room. A room has `id`, `name`, `moves` (UCI strings), `status` (`playing`, `checkmate`, or `finished`), `winner` (`white`, `black`, or `null`), `fen`, and seated `white` and `black` (`null` until that color sits). `fen` starts at `rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1`.
 
 `POST /api/rooms/:id/join` `{ "name", "color" }` with `color` of `white` or `black` returns `{ token, room }`. A taken seat rejects a different name with 409. A tournament room only admits the paired name.
 
 `POST /api/rooms/:id/move` `{ "token", "uci" }` plays a move for the seat whose turn it is. Scholar's mate (`e2e4 e7e5 d1h5 b8c6 f1c4 g8f6 h5f7`) ends `status: "checkmate"`, `winner: "white"`. An illegal move or a move after the game is over is 400.
 
-`GET /api/rooms/:id` returns the room, including `moves`, `status`, and `winner`.
+`GET /api/rooms/:id` returns the room, including `moves`, `status`, `winner`, `fen`, `white`, and `black`. A missing id is `404` `{ "error": "not found" }`.
 
-`POST /api/tournaments` `{ "name" }`, then `POST /api/tournaments/:id/players` `{ "name" }`. `POST .../start` needs two or more players and opens a room for each pairing. `POST .../results` `{ "round", "white", "black", "result" }` records `1-0`, `0-1`, or `1/2-1/2` when the room was not already finished. A checkmate in the pairing's room records the result itself. `POST .../next` starts another round after every pairing in the current round has a result.
+`POST /api/tournaments` `{ "name" }`, then `POST /api/tournaments/:id/players` `{ "name" }`. `GET /api/tournaments/:id` returns `players` as `{ "name", "score" }` (a win is 1, a draw is 0.5 each) and `rounds` of pairings `{ "white", "black", "roomId", "result" }`. `POST .../start` needs two or more players and opens a room for each pairing. `POST .../results` `{ "round", "white", "black", "result" }` records `1-0`, `0-1`, or `1/2-1/2` when the room is still `playing`, then sets that room to `finished`. A checkmate in the pairing's room records `1-0` or `0-1` itself. `POST .../next` starts another round after every pairing in the current round has a result.
 
 `GET /` is the page. It contains `id="rooms"`, `id="board"`, and `id="tournaments"`, plus controls to open a room, sit, move, and run a tournament.
 
