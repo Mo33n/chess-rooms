@@ -181,18 +181,20 @@ export function mount(doc, options = {}) {
       }
       tournament.rounds.forEach((round, index) => {
         for (const pairing of round.pairings) {
+          const label = `${pairing.white} ${pairing.black}`;
           const white = doc.createElement("span");
-          white.textContent = pairing.white;
+          white.textContent = `${pairing.white} `;
           const black = doc.createElement("span");
-          black.textContent = pairing.black;
+          black.textContent = `${pairing.black} `;
           const roomId = doc.createElement("span");
-          roomId.textContent = pairing.roomId;
+          roomId.textContent = `${pairing.roomId} `;
           const result = doc.createElement("span");
           result.dataset.role = "result";
           result.textContent = pairing.result == null ? "" : pairing.result;
           const open = doc.createElement("button");
           open.type = "button";
           open.textContent = "Open";
+          open.setAttribute("aria-label", `Open ${label}`);
           open.addEventListener("click", () => {
             openPairing(pairing).catch((err) => showTournamentError(err.message));
           });
@@ -201,6 +203,7 @@ export function mount(doc, options = {}) {
             const draw = doc.createElement("button");
             draw.type = "button";
             draw.textContent = "Draw";
+            draw.setAttribute("aria-label", `Draw ${label}`);
             draw.addEventListener("click", () => {
               recordDraw(index + 1, pairing).catch((err) => showTournamentError(err.message));
             });
@@ -420,7 +423,10 @@ export function mount(doc, options = {}) {
   }
 
   async function startTournament() {
-    if (!tournamentId) return;
+    if (!tournamentId) {
+      showTournamentError("Host a tournament before starting.");
+      return;
+    }
     const response = await request(`/api/tournaments/${tournamentId}/start`, { method: "POST" });
     const body = await readBody(response);
     if (response.status === 404) {
@@ -474,7 +480,10 @@ export function mount(doc, options = {}) {
   }
 
   async function nextRound() {
-    if (!tournamentId) return;
+    if (!tournamentId) {
+      showTournamentError("Host a tournament before the next round.");
+      return;
+    }
     const response = await request(`/api/tournaments/${tournamentId}/next`, { method: "POST" });
     const body = await readBody(response);
     if (response.status === 404) {

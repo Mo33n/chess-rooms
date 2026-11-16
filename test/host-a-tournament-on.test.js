@@ -433,3 +433,61 @@ test("a tournament 404 leaves the column", async () => {
   assert.equal(columnText(doc), "");
   assert.equal(doc.getElementById("tournaments").children.length, 0);
 });
+
+test("pairings are separated and start or next needs a tournament", async () => {
+  const doc = page();
+  const timers = [];
+  session(doc, "", timers, async (url, init) => {
+    if (String(url) === "/api/tournaments" && init?.method === "POST") {
+      return Response.json({ id: "t-sep", name: "Sunday", players: [], rounds: [] });
+    }
+    if (String(url).endsWith("/players")) {
+      const name = JSON.parse(init.body).name;
+      const players = name === "Bea"
+        ? [{ name: "Ada", score: 0 }, { name: "Bea", score: 0 }, { name: "Cal", score: 0 }, { name: "Dee", score: 0 }]
+        : [{ name: "Ada", score: 0 }];
+      return Response.json({ id: "t-sep", name: "Sunday", players, rounds: [] });
+    }
+    if (String(url).endsWith("/start")) {
+      return Response.json({
+        id: "t-sep",
+        name: "Sunday",
+        players: [
+          { name: "Ada", score: 0 },
+          { name: "Bea", score: 0 },
+          { name: "Cal", score: 0 },
+          { name: "Dee", score: 0 },
+        ],
+        rounds: [{
+          pairings: [
+            { white: "Ada", black: "Bea", roomId: "room-ab", result: null },
+            { white: "Cal", black: "Dee", roomId: "room-cd", result: null },
+          ],
+        }],
+      });
+    }
+    return new Response(JSON.stringify({ error: "not found" }), { status: 404 });
+  });
+  doc.buttons["start-tournament"].click();
+  await until(() => columnText(doc).includes("Host a tournament before starting.") && "start");
+  doc.buttons["next-round"].click();
+  await until(() => columnText(doc).includes("Host a tournament before the next round.") && "next");
+  doc.nodes["tournament-name"].value = "Sunday";
+  doc.buttons.host.click();
+  await until(() => columnText(doc).includes("Sunday") && "hosted");
+  for (const name of ["Ada", "Bea"]) {
+    doc.nodes["player-name"].value = name;
+    doc.buttons["add-player"].click();
+    await until(() => columnText(doc).includes(name) && name);
+  }
+  doc.buttons["start-tournament"].click();
+  await until(() => buttonsNamed(doc, "Open").length === 2 && "open");
+  const labels = [];
+  walk(doc.getElementById("tournaments"), (node) => {
+    if (node.attrs?.["aria-label"]) labels.push(node.attrs["aria-label"]);
+  });
+  assert.deepEqual(labels, ["Open Ada Bea", "Draw Ada Bea", "Open Cal Dee", "Draw Cal Dee"]);
+  const text = columnText(doc);
+  assert.match(text, /Ada\s+Bea\s+room-ab/);
+  assert.match(text, /Cal\s+Dee\s+room-cd/);
+});
