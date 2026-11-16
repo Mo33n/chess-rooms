@@ -15,6 +15,16 @@
   </form>
   <div id="rooms"></div>
   <div id="board"></div>
+  <form>
+    <label for="tournament-name">Tournament</label>
+    <input type="text" id="tournament-name" name="tournament-name">
+    <button type="button" data-action="host">Host</button>
+    <label for="player-name">Player</label>
+    <input type="text" id="player-name" name="player-name">
+    <button type="button" data-action="add-player">Add player</button>
+    <button type="button" data-action="start-tournament">Start</button>
+    <button type="button" data-action="next-round">Next round</button>
+  </form>
   <div id="tournaments"></div>
   <script type="module" src="/play.js"></script>
 </body>
