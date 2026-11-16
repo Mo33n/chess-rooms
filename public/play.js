@@ -181,7 +181,9 @@ export function mount(doc, options = {}) {
       }
       tournament.rounds.forEach((round, index) => {
         for (const pairing of round.pairings) {
-          const label = `${pairing.white} ${pairing.black}`;
+          const roundNumber = index + 1;
+          const label = `round ${roundNumber} ${pairing.white} ${pairing.black}`;
+          const row = doc.createElement("p");
           const white = doc.createElement("span");
           white.textContent = `${pairing.white} `;
           const black = doc.createElement("span");
@@ -190,7 +192,7 @@ export function mount(doc, options = {}) {
           roomId.textContent = `${pairing.roomId} `;
           const result = doc.createElement("span");
           result.dataset.role = "result";
-          result.textContent = pairing.result == null ? "" : pairing.result;
+          result.textContent = pairing.result == null ? "" : `${pairing.result} `;
           const open = doc.createElement("button");
           open.type = "button";
           open.textContent = "Open";
@@ -198,17 +200,18 @@ export function mount(doc, options = {}) {
           open.addEventListener("click", () => {
             openPairing(pairing).catch((err) => showTournamentError(err.message));
           });
-          tournamentsEl.append(white, black, roomId, result, open);
+          row.append(white, black, roomId, result, open);
           if (!pairing.result) {
             const draw = doc.createElement("button");
             draw.type = "button";
             draw.textContent = "Draw";
             draw.setAttribute("aria-label", `Draw ${label}`);
             draw.addEventListener("click", () => {
-              recordDraw(index + 1, pairing).catch((err) => showTournamentError(err.message));
+              recordDraw(roundNumber, pairing).catch((err) => showTournamentError(err.message));
             });
-            tournamentsEl.append(draw);
+            row.append(draw);
           }
+          tournamentsEl.append(row);
         }
       });
     }

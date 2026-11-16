@@ -154,7 +154,7 @@ function boardText(doc) {
 function results(doc) {
   const found = [];
   walk(doc.getElementById("tournaments"), (node) => {
-    if (node.dataset?.role === "result") found.push(node.textContent);
+    if (node.dataset?.role === "result") found.push(node.textContent.trim());
   });
   return found;
 }
@@ -340,6 +340,16 @@ test("next round shows an error until every pairing has a result", async (t) => 
   await until(() => results(doc).every((result) => result === "1/2-1/2") && "both");
   doc.buttons["next-round"].click();
   await until(() => results(doc).length === 4 && "round-two");
+  const labels = [];
+  walk(doc.getElementById("tournaments"), (node) => {
+    if (node.attrs?.["aria-label"]?.startsWith("Open ")) labels.push(node.attrs["aria-label"]);
+  });
+  assert.deepEqual(labels, [
+    "Open round 1 Ada Bea",
+    "Open round 1 Cal Dee",
+    "Open round 2 Ada Bea",
+    "Open round 2 Cal Dee",
+  ]);
   const opens = buttonsNamed(doc, "Open");
   opens[opens.length - 1].click();
   await until(() => boardText(doc).includes(START_PLACEMENT) && "round-room");
@@ -486,7 +496,12 @@ test("pairings are separated and start or next needs a tournament", async () => 
   walk(doc.getElementById("tournaments"), (node) => {
     if (node.attrs?.["aria-label"]) labels.push(node.attrs["aria-label"]);
   });
-  assert.deepEqual(labels, ["Open Ada Bea", "Draw Ada Bea", "Open Cal Dee", "Draw Cal Dee"]);
+  assert.deepEqual(labels, [
+    "Open round 1 Ada Bea",
+    "Draw round 1 Ada Bea",
+    "Open round 1 Cal Dee",
+    "Draw round 1 Cal Dee",
+  ]);
   const text = columnText(doc);
   assert.match(text, /Ada\s+Bea\s+room-ab/);
   assert.match(text, /Cal\s+Dee\s+room-cd/);
